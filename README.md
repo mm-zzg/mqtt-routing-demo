@@ -7,6 +7,7 @@ This repo is a proof-of-concept for the architecture in the diagram:
 - local-only custom ingress for debugging
 - Azure Container Apps native ingress for production traffic
 - protocol-transfer worker
+- client simulator UI for managing ongoing simulated MQTT clients and client certificates
 - Terraform for Azure Container Apps, DNS, and certificates
 - GitHub Actions for build and deploy automation
 
@@ -29,3 +30,9 @@ Cloudflare serves the public certificate automatically at the edge. Terraform on
 ## Local run
 
 Open the AppHost project and run the Aspire solution to start the services together.
+
+The client simulator is available as a web UI and lets you:
+- add/remove client certificate entries (PFX base64 + password validation)
+- create simulated MQTT client profiles
+- start/stop/remove ongoing client sessions
+- monitor runtime status, publish counts, last activity, and last errors

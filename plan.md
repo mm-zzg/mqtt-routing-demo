@@ -16,7 +16,9 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 - Terraform deployment path added
 - Cloudflare origin certificate flow wired
 - Public edge TLS delegated to Cloudflare when proxied
+- Client simulator UI project added for managing simulated clients and certificate inventory
+- AppHost launch settings added for local startup and dashboard discovery
 
 ## Open questions
 - Should Cloudflare DNS records also be managed in Terraform?
-- Should the runtime stay as a lightweight proof-of-concept or be upgraded to a real MQTT broker?
+- Should the runtime stay as a lightweight proof-of-concept or be upgraded to a real MQTT broker and real MQTT client session transport?

@@ -37,4 +37,7 @@ builder.AddProject("protocol-transfer", @"..\MqttRouting.ProtocolTransfer\MqttRo
     .WithEnvironment("ProtocolTransfer__Brokers__1__Host", "localhost")
     .WithEnvironment("ProtocolTransfer__Brokers__1__Port", "18081");
 
+builder.AddProject("client-simulator", @"..\MqttRouting.ClientSimulator\MqttRouting.ClientSimulator.csproj")
+    .WithEnvironment("ASPNETCORE_URLS", "http://+:18110");
+
 builder.Build().Run();

@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "MqttRouting.AppHost": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17192;http://localhost:15192",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "BaseDomain": "example.com"
+      }
+    }
+  }
+}
