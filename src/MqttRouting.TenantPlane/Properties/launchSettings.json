@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "MqttRouting.TenantPlane": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:51651;http://localhost:51652"
+    }
+  }
+}
