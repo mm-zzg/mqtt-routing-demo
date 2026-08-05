@@ -10,10 +10,13 @@
 - Reviewed current implementation gaps and launch behavior
 
 ## Next
-- Add Cloudflare DNS automation in Terraform
+- Validate Cloudflare DNS zone and record management in Terraform
 - Upgrade the client simulator to real MQTT transport and persistence
 - Close the running AppHost process before rebuilds so the output executable is not locked
 - Keep AppHost local startup free of the dashboard HTTP/proxy dependency
+
+## Immediate action
+- Implement Cloudflare DNS zone/record resources in Terraform and remove the duplicate placeholder next item after that lands.
 
 ## Notes
 - Public edge TLS is handled by Cloudflare automatically when proxied

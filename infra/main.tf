@@ -200,6 +200,28 @@ resource "azurerm_dns_zone" "this" {
   resource_group_name = azurerm_resource_group.this.name
 }
 
+resource "cloudflare_dns_record" "tenant" {
+  for_each = local.tenant_hosts
+
+  zone_id = var.cloudflare_zone_id
+  name    = each.key
+  type    = "CNAME"
+  content = azurerm_container_app.tenant[each.key].latest_revision_fqdn
+  ttl     = 300
+  proxied = var.cloudflare_proxy
+}
+
+resource "cloudflare_dns_record" "tenant_verification" {
+  for_each = local.tenant_hosts
+
+  zone_id = var.cloudflare_zone_id
+  name    = "asuid.${each.key}"
+  type    = "TXT"
+  content = azurerm_container_app.tenant[each.key].custom_domain_verification_id
+  ttl     = 300
+  proxied = false
+}
+
 resource "azurerm_dns_cname_record" "tenant" {
   for_each            = local.tenant_hosts
   name                = each.key

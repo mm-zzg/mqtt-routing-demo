@@ -27,3 +27,14 @@ variable "image_tag" {
   description = "Container image tag pushed by GitHub Actions."
   default     = "latest"
 }
+
+variable "cloudflare_zone_id" {
+  type        = string
+  description = "Cloudflare zone ID for the public domain."
+}
+
+variable "cloudflare_proxy" {
+  type        = bool
+  description = "Whether Cloudflare should proxy the DNS records."
+  default     = true
+}

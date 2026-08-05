@@ -21,7 +21,11 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 - AppHost local launch is configured to avoid the dashboard HTTP/proxy dependency during startup
 - AppHost requires the generated executable to be closed before rebuild/start because the output is locked while the process is running
 - Client simulator is still in-memory and needs to be upgraded to real MQTT transport and persistence
+- Cloudflare DNS records are now intended to be managed by Terraform alongside Azure resources
 
 ## Next implementation steps
 1. Add Cloudflare DNS zone and record management to Terraform so public hostnames, validation, and proxying are fully declarative.
 2. Upgrade the client simulator from in-memory simulation to real MQTT transport and persistence.
+
+## Immediate action
+- Implement Cloudflare DNS zone and record resources in Terraform.
