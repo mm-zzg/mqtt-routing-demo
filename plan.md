@@ -18,7 +18,10 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 - Public edge TLS delegated to Cloudflare when proxied
 - Client simulator UI project added for managing simulated clients and certificate inventory
 - AppHost launch settings added for local startup and dashboard discovery
+- AppHost local launch is configured to avoid the dashboard HTTP/proxy dependency during startup
+- AppHost requires the generated executable to be closed before rebuild/start because the output is locked while the process is running
+- Client simulator is still in-memory and needs to be upgraded to real MQTT transport and persistence
 
-## Open questions
-- Should Cloudflare DNS records also be managed in Terraform?
-- Should the runtime stay as a lightweight proof-of-concept or be upgraded to a real MQTT broker and real MQTT client session transport?
+## Next implementation steps
+1. Add Cloudflare DNS zone and record management to Terraform so public hostnames, validation, and proxying are fully declarative.
+2. Upgrade the client simulator from in-memory simulation to real MQTT transport and persistence.

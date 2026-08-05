@@ -7,10 +7,13 @@
 - Adding GitHub Actions deployment
 - Added client simulator UI project for simulated MQTT client lifecycle and certificate inventory management
 - Added AppHost launch settings for local startup
+- Reviewed current implementation gaps and launch behavior
 
 ## Next
-- Decide whether to add Cloudflare DNS automation in Terraform
-- Decide whether to replace the placeholder HTTP-based runtime and simulated client transport with real MQTT protocol operations
+- Add Cloudflare DNS automation in Terraform
+- Upgrade the client simulator to real MQTT transport and persistence
+- Close the running AppHost process before rebuilds so the output executable is not locked
+- Keep AppHost local startup free of the dashboard HTTP/proxy dependency
 
 ## Notes
 - Public edge TLS is handled by Cloudflare automatically when proxied
