@@ -1,3 +1,9 @@
+data "cloudflare_zone" "this" {
+  filter {
+    name = var.base_domain
+  }
+}
+
 locals {
   resource_group_name = "${var.name_prefix}-rg"
   log_analytics_name   = "${var.name_prefix}-law"
@@ -7,6 +13,7 @@ locals {
   tenant_apps          = { for tenant in var.tenant_names : tenant => "${var.name_prefix}-${tenant}" }
   tenant_hosts         = { for tenant in var.tenant_names : tenant => "${tenant}.${var.base_domain}" }
   wildcard_host        = "*.${var.base_domain}"
+  zone_id              = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : data.cloudflare_zone.this.id
   images = {
     transfer = "${azurerm_container_registry.this.login_server}/protocol-transfer:${var.image_tag}"
   }
@@ -203,23 +210,49 @@ resource "azurerm_dns_zone" "this" {
 resource "cloudflare_dns_record" "tenant" {
   for_each = local.tenant_hosts
 
-  zone_id = var.cloudflare_zone_id
+  zone_id = local.zone_id
   name    = each.key
   type    = "CNAME"
   content = azurerm_container_app.tenant[each.key].latest_revision_fqdn
-  ttl     = 300
+  ttl     = 1
   proxied = var.cloudflare_proxy
 }
 
 resource "cloudflare_dns_record" "tenant_verification" {
   for_each = local.tenant_hosts
 
-  zone_id = var.cloudflare_zone_id
+  zone_id = local.zone_id
   name    = "asuid.${each.key}"
   type    = "TXT"
   content = azurerm_container_app.tenant[each.key].custom_domain_verification_id
   ttl     = 300
   proxied = false
+}
+
+# --- Cloudflare zone settings ---
+
+resource "cloudflare_zone_setting" "ssl" {
+  zone_id    = local.zone_id
+  setting_id = "ssl"
+  value      = var.cloudflare_ssl_mode
+}
+
+resource "cloudflare_zone_setting" "always_use_https" {
+  zone_id    = local.zone_id
+  setting_id = "always_use_https"
+  value      = "on"
+}
+
+resource "cloudflare_zone_setting" "min_tls_version" {
+  zone_id    = local.zone_id
+  setting_id = "min_tls_version"
+  value      = "1.2"
+}
+
+resource "cloudflare_zone_setting" "http3" {
+  zone_id    = local.zone_id
+  setting_id = "http3"
+  value      = "on"
 }
 
 resource "azurerm_dns_cname_record" "tenant" {

@@ -1,72 +1,131 @@
 using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
-using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.EntityFrameworkCore;
+using MQTTnet;
+using MQTTnet.Protocol;
+using MqttRouting.ClientSimulator.Data;
 
 namespace MqttRouting.ClientSimulator.Services;
 
 public sealed class ClientSimulatorManager
 {
-    private readonly ConcurrentDictionary<string, ClientCertificateRecord> _certificates = new();
     private readonly ConcurrentDictionary<string, ClientRuntime> _clients = new();
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ClientSimulatorManager> _logger;
 
-    public ClientSimulatorManager(ILogger<ClientSimulatorManager> logger)
+    public ClientSimulatorManager(IServiceScopeFactory scopeFactory, ILogger<ClientSimulatorManager> logger)
     {
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
-    public IReadOnlyList<ClientCertificateRecord> GetCertificates() =>
-        _certificates.Values.OrderBy(c => c.Name).ToList();
+    public async Task<List<ClientCertificateRecord>> GetCertificatesAsync()
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var entities = await db.Certificates.OrderBy(c => c.Name).ToListAsync();
+        return entities.Select(e => new ClientCertificateRecord(e.Id, e.Name, e.PfxBase64, e.Password, e.CreatedAt)).ToList();
+    }
 
     public IReadOnlyList<ClientRuntimeSnapshot> GetClients() =>
         _clients.Values.Select(c => c.ToSnapshot()).OrderBy(c => c.Name).ToList();
 
-    public string AddCertificate(CertificateInput input)
+    public async Task<string> AddCertificateAsync(CertificateInput input)
     {
         _ = X509CertificateLoader.LoadPkcs12(Convert.FromBase64String(input.PfxBase64), input.Password);
-        var id = Guid.NewGuid().ToString("N");
-        var certificate = new ClientCertificateRecord(id, input.Name.Trim(), input.PfxBase64.Trim(), input.Password, DateTimeOffset.UtcNow);
-        if (!_certificates.TryAdd(id, certificate))
-        {
-            throw new InvalidOperationException("Unable to add certificate.");
-        }
 
-        return id;
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var entity = new CertificateEntity
+        {
+            Name = input.Name.Trim(),
+            PfxBase64 = input.PfxBase64.Trim(),
+            Password = input.Password
+        };
+        db.Certificates.Add(entity);
+        await db.SaveChangesAsync();
+
+        return entity.Id;
     }
 
-    public string AddClient(ClientInput input)
+    public async Task<string> AddClientAsync(ClientInput input)
     {
-        if (!string.IsNullOrEmpty(input.CertificateId) && !_certificates.ContainsKey(input.CertificateId))
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        if (!string.IsNullOrEmpty(input.CertificateId))
         {
-            throw new InvalidOperationException("Selected certificate was not found.");
+            var certExists = await db.Certificates.AnyAsync(c => c.Id == input.CertificateId);
+            if (!certExists)
+                throw new InvalidOperationException("Selected certificate was not found.");
         }
 
-        var id = Guid.NewGuid().ToString("N");
+        var entity = new ClientConfigEntity
+        {
+            Name = input.Name.Trim(),
+            BrokerHost = input.BrokerHost.Trim(),
+            BrokerPort = input.BrokerPort,
+            Topic = input.Topic.Trim(),
+            PublishIntervalSeconds = input.PublishIntervalSeconds,
+            CertificateId = string.IsNullOrEmpty(input.CertificateId) ? null : input.CertificateId
+        };
+        db.ClientConfigs.Add(entity);
+        await db.SaveChangesAsync();
+
+        ClientCertificateRecord? certRecord = null;
+        if (entity.CertificateId is not null)
+        {
+            var certEntity = await db.Certificates.FirstOrDefaultAsync(c => c.Id == entity.CertificateId);
+            if (certEntity is not null)
+                certRecord = new ClientCertificateRecord(certEntity.Id, certEntity.Name, certEntity.PfxBase64, certEntity.Password, certEntity.CreatedAt);
+        }
+
         var runtime = new ClientRuntime(
-            id,
-            input.Name.Trim(),
-            input.BrokerHost.Trim(),
-            input.BrokerPort,
-            input.Topic.Trim(),
-            input.PublishIntervalSeconds,
-            input.CertificateId,
+            entity.Id,
+            entity.Name,
+            entity.BrokerHost,
+            entity.BrokerPort,
+            entity.Topic,
+            entity.PublishIntervalSeconds,
+            entity.CertificateId,
+            certRecord,
             _logger);
 
-        if (!_clients.TryAdd(id, runtime))
+        if (!_clients.TryAdd(entity.Id, runtime))
+            throw new InvalidOperationException("Unable to add client runtime.");
+
+        return entity.Id;
+    }
+
+    public async Task LoadPersistedClientsAsync()
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var configs = await db.ClientConfigs.Include(c => c.Certificate).ToListAsync();
+
+        foreach (var config in configs)
         {
-            throw new InvalidOperationException("Unable to add client.");
+            var certRecord = config.Certificate is not null
+                ? new ClientCertificateRecord(config.Certificate.Id, config.Certificate.Name,
+                    config.Certificate.PfxBase64, config.Certificate.Password, config.Certificate.CreatedAt)
+                : null;
+
+            var runtime = new ClientRuntime(
+                config.Id, config.Name, config.BrokerHost, config.BrokerPort,
+                config.Topic, config.PublishIntervalSeconds, config.CertificateId,
+                certRecord, _logger);
+
+            _clients.TryAdd(config.Id, runtime);
         }
 
-        return id;
+        _logger.LogInformation("Loaded {Count} persisted client configs.", configs.Count);
     }
 
     public Task StartClientAsync(string clientId, CancellationToken cancellationToken)
     {
         if (!_clients.TryGetValue(clientId, out var runtime))
-        {
             throw new InvalidOperationException("Client was not found.");
-        }
 
         return runtime.StartAsync(cancellationToken);
     }
@@ -74,9 +133,7 @@ public sealed class ClientSimulatorManager
     public Task StopClientAsync(string clientId)
     {
         if (!_clients.TryGetValue(clientId, out var runtime))
-        {
             throw new InvalidOperationException("Client was not found.");
-        }
 
         return runtime.StopAsync();
     }
@@ -84,11 +141,18 @@ public sealed class ClientSimulatorManager
     public async Task RemoveClientAsync(string clientId)
     {
         if (!_clients.TryRemove(clientId, out var runtime))
-        {
             throw new InvalidOperationException("Client was not found.");
-        }
 
         await runtime.StopAsync();
+
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var config = await db.ClientConfigs.FindAsync(clientId);
+        if (config is not null)
+        {
+            db.ClientConfigs.Remove(config);
+            await db.SaveChangesAsync();
+        }
     }
 
     public async Task StopAllAsync()
@@ -96,26 +160,43 @@ public sealed class ClientSimulatorManager
         foreach (var clientId in _clients.Keys)
         {
             if (_clients.TryGetValue(clientId, out var runtime))
-            {
                 await runtime.StopAsync();
-            }
         }
     }
 }
 
+// ── Start-and-load hosted service ──────────────────────────────────
+
 public sealed class ClientSimulatorHostedService : IHostedService
 {
     private readonly ClientSimulatorManager _manager;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<ClientSimulatorHostedService> _logger;
 
-    public ClientSimulatorHostedService(ClientSimulatorManager manager)
+    public ClientSimulatorHostedService(
+        ClientSimulatorManager manager,
+        IServiceScopeFactory scopeFactory,
+        ILogger<ClientSimulatorHostedService> logger)
     {
         _manager = manager;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.EnsureCreatedAsync(cancellationToken);
+        _logger.LogInformation("Database ensured.");
+
+        await _manager.LoadPersistedClientsAsync();
+    }
 
     public Task StopAsync(CancellationToken cancellationToken) => _manager.StopAllAsync();
 }
+
+// ── Input models ───────────────────────────────────────────────────
 
 public sealed class CertificateInput
 {
@@ -149,6 +230,8 @@ public sealed class ClientInput
     public string? CertificateId { get; set; }
 }
 
+// ── Domain records ─────────────────────────────────────────────────
+
 public sealed record ClientCertificateRecord(
     string Id,
     string Name,
@@ -177,10 +260,13 @@ public sealed record ClientRuntimeSnapshot(
     DateTimeOffset? LastPublishedAt,
     string? LastError);
 
+// ── MQTT-based client runtime ──────────────────────────────────────
+
 internal sealed class ClientRuntime
 {
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly ClientCertificateRecord? _certificate;
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private string? _lastError;
@@ -195,6 +281,7 @@ internal sealed class ClientRuntime
         string topic,
         int publishIntervalSeconds,
         string? certificateId,
+        ClientCertificateRecord? certificate,
         ILogger logger)
     {
         Id = id;
@@ -204,6 +291,7 @@ internal sealed class ClientRuntime
         Topic = topic;
         PublishIntervalSeconds = publishIntervalSeconds;
         CertificateId = certificateId;
+        _certificate = certificate;
         _logger = logger;
     }
 
@@ -217,18 +305,8 @@ internal sealed class ClientRuntime
     public ClientStatus Status { get; private set; } = ClientStatus.Stopped;
 
     public ClientRuntimeSnapshot ToSnapshot() =>
-        new(
-            Id,
-            Name,
-            BrokerHost,
-            BrokerPort,
-            Topic,
-            PublishIntervalSeconds,
-            CertificateId,
-            Status,
-            _publishCount,
-            _lastPublishedAt,
-            _lastError);
+        new(Id, Name, BrokerHost, BrokerPort, Topic, PublishIntervalSeconds,
+            CertificateId, Status, _publishCount, _lastPublishedAt, _lastError);
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -236,46 +314,29 @@ internal sealed class ClientRuntime
         try
         {
             if (Status is ClientStatus.Starting or ClientStatus.Running)
-            {
                 return;
-            }
 
             Status = ClientStatus.Starting;
             _lastError = null;
             _loopCts = new CancellationTokenSource();
             _loopTask = RunLoopAsync(_loopCts.Token);
         }
-        finally
-        {
-            _gate.Release();
-        }
+        finally { _gate.Release(); }
     }
 
     public async Task StopAsync()
     {
         Task? runningTask;
-
         await _gate.WaitAsync();
         try
         {
-            if (_loopCts is null)
-            {
-                Status = ClientStatus.Stopped;
-                return;
-            }
-
+            if (_loopCts is null) { Status = ClientStatus.Stopped; return; }
             _loopCts.Cancel();
             runningTask = _loopTask;
         }
-        finally
-        {
-            _gate.Release();
-        }
+        finally { _gate.Release(); }
 
-        if (runningTask is not null)
-        {
-            await runningTask;
-        }
+        if (runningTask is not null) await runningTask;
 
         await _gate.WaitAsync();
         try
@@ -285,21 +346,69 @@ internal sealed class ClientRuntime
             _loopTask = null;
             Status = ClientStatus.Stopped;
         }
-        finally
-        {
-            _gate.Release();
-        }
+        finally { _gate.Release(); }
     }
 
     private async Task RunLoopAsync(CancellationToken cancellationToken)
     {
-        Status = ClientStatus.Running;
+        var mqttFactory = new MqttClientFactory();
+        using var mqttClient = mqttFactory.CreateMqttClient();
+
+        mqttClient.ConnectedAsync += _ =>
+        {
+            _logger.LogInformation("MQTT client {ClientName} connected to {Host}:{Port}.", Name, BrokerHost, BrokerPort);
+            return Task.CompletedTask;
+        };
+
+        mqttClient.DisconnectedAsync += e =>
+        {
+            var reason = e.Reason;
+            _logger.LogWarning("MQTT client {ClientName} disconnected: {Reason}.", Name, reason);
+            return Task.CompletedTask;
+        };
 
         try
         {
+            var optionsBuilder = new MqttClientOptionsBuilder()
+                .WithTcpServer(BrokerHost, BrokerPort)
+                .WithClientId($"sim-{Id[..8]}")
+                .WithCleanSession();
+
+            if (_certificate is not null)
+            {
+                var certBytes = Convert.FromBase64String(_certificate.PfxBase64);
+                var cert = X509CertificateLoader.LoadPkcs12(certBytes, _certificate.Password);
+                var certs = new X509Certificate2Collection(cert);
+                optionsBuilder.WithTlsOptions(o =>
+                {
+                    o.WithClientCertificates(certs);
+                    o.WithSslProtocols(System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13);
+                    o.UseTls();
+                });
+            }
+
+            var options = optionsBuilder.Build();
+
+            _logger.LogInformation("MQTT client {ClientName} connecting to {Host}:{Port}...", Name, BrokerHost, BrokerPort);
+            await mqttClient.ConnectAsync(options, cancellationToken);
+
+            Status = ClientStatus.Running;
+
             while (!cancellationToken.IsCancellationRequested)
             {
-                await SimulatePublishAsync(cancellationToken);
+                var payload = $"Simulator heartbeat from {Name} at {DateTimeOffset.UtcNow:O}";
+                var message = new MqttApplicationMessageBuilder()
+                    .WithTopic(Topic)
+                    .WithPayload(payload)
+                    .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                    .WithRetainFlag(false)
+                    .Build();
+
+                await mqttClient.PublishAsync(message, cancellationToken);
+                Interlocked.Increment(ref _publishCount);
+                _lastPublishedAt = DateTimeOffset.UtcNow;
+                _logger.LogInformation("MQTT client {ClientName} published to {Topic} (#{Count}).", Name, Topic, _publishCount);
+
                 await Task.Delay(TimeSpan.FromSeconds(PublishIntervalSeconds), cancellationToken);
             }
         }
@@ -307,28 +416,22 @@ internal sealed class ClientRuntime
         {
             Status = ClientStatus.Stopped;
         }
-        catch (SocketException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _lastError = ex.Message;
             Status = ClientStatus.Faulted;
-            _logger.LogError(ex, "Simulator client {ClientName} failed with socket error.", Name);
+            _logger.LogError(ex, "MQTT client {ClientName} failed: {Message}", Name, ex.Message);
         }
-        catch (IOException ex)
+        finally
         {
-            _lastError = ex.Message;
-            Status = ClientStatus.Faulted;
-            _logger.LogError(ex, "Simulator client {ClientName} failed while simulating publish.", Name);
+            if (mqttClient.IsConnected)
+            {
+                var disconnectOptions = new MqttClientDisconnectOptions
+                {
+                    Reason = MqttClientDisconnectOptionsReason.NormalDisconnection
+                };
+                await mqttClient.DisconnectAsync(disconnectOptions);
+            }
         }
-    }
-
-    private async Task SimulatePublishAsync(CancellationToken cancellationToken)
-    {
-        using var tcpClient = new TcpClient();
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
-        await tcpClient.ConnectAsync(BrokerHost, BrokerPort, timeoutCts.Token);
-        Interlocked.Increment(ref _publishCount);
-        _lastPublishedAt = DateTimeOffset.UtcNow;
-        _logger.LogInformation("Simulator client {ClientName} reached {Host}:{Port} for topic {Topic}.", Name, BrokerHost, BrokerPort, Topic);
     }
 }

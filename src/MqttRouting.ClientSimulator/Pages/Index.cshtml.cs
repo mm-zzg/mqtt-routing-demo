@@ -22,23 +22,23 @@ public class IndexModel : PageModel
     [BindProperty]
     public ClientInput NewClient { get; set; } = new();
 
-    public IReadOnlyList<ClientCertificateRecord> Certificates { get; private set; } = [];
+    public List<ClientCertificateRecord> Certificates { get; private set; } = [];
 
     public IReadOnlyList<ClientRuntimeSnapshot> Clients { get; private set; } = [];
 
-    public void OnGet() => Reload();
+    public async Task OnGetAsync() => await ReloadAsync();
 
-    public IActionResult OnPostAddCertificate()
+    public async Task<IActionResult> OnPostAddCertificateAsync()
     {
         if (!ModelState.IsValid)
         {
-            Reload();
+            await ReloadAsync();
             return Page();
         }
 
         try
         {
-            _manager.AddCertificate(NewCertificate);
+            await _manager.AddCertificateAsync(NewCertificate);
             TempData["StatusMessage"] = "Certificate added.";
             return RedirectToPage();
         }
@@ -46,29 +46,29 @@ public class IndexModel : PageModel
         {
             _logger.LogWarning(ex, "Invalid PFX base64 input.");
             ModelState.AddModelError("NewCertificate.PfxBase64", "The PFX input must be valid base64.");
-            Reload();
+            await ReloadAsync();
             return Page();
         }
         catch (CryptographicException ex)
         {
             _logger.LogWarning(ex, "Invalid certificate payload.");
             ModelState.AddModelError("NewCertificate.Password", "The PFX or password is invalid.");
-            Reload();
+            await ReloadAsync();
             return Page();
         }
     }
 
-    public IActionResult OnPostAddClient()
+    public async Task<IActionResult> OnPostAddClientAsync()
     {
         if (!ModelState.IsValid)
         {
-            Reload();
+            await ReloadAsync();
             return Page();
         }
 
         try
         {
-            _manager.AddClient(NewClient);
+            await _manager.AddClientAsync(NewClient);
             TempData["StatusMessage"] = "Client profile created.";
             return RedirectToPage();
         }
@@ -76,7 +76,7 @@ public class IndexModel : PageModel
         {
             _logger.LogWarning(ex, "Unable to add client.");
             ModelState.AddModelError("NewClient.CertificateId", ex.Message);
-            Reload();
+            await ReloadAsync();
             return Page();
         }
     }
@@ -102,9 +102,9 @@ public class IndexModel : PageModel
         return RedirectToPage();
     }
 
-    private void Reload()
+    private async Task ReloadAsync()
     {
-        Certificates = _manager.GetCertificates();
+        Certificates = await _manager.GetCertificatesAsync();
         Clients = _manager.GetClients();
     }
 }

@@ -10,4 +10,15 @@
     <ProjectReference Include="..\MqttRouting.ProtocolTransfer\MqttRouting.ProtocolTransfer.csproj" />
     <ProjectReference Include="..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj" />
   </ItemGroup>
+
+  <Target Name="KillRunningAppHost" BeforeTargets="Build;Clean;Rebuild">
+    <Exec Command="taskkill /F /IM MqttRouting.AppHost.exe 2&gt;nul || exit 0"
+          Condition="$([MSBuild]::IsOSPlatform('Windows'))"
+          ContinueOnError="true"
+          EchoOff="true" />
+    <Exec Command="pkill -f MqttRouting.AppHost || true"
+          Condition="!$([MSBuild]::IsOSPlatform('Windows'))"
+          ContinueOnError="true"
+          EchoOff="true" />
+  </Target>
 </Project>

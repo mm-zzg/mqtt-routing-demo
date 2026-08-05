@@ -30,11 +30,24 @@ variable "image_tag" {
 
 variable "cloudflare_zone_id" {
   type        = string
-  description = "Cloudflare zone ID for the public domain."
+  description = "Cloudflare zone ID for the public domain. Leave empty to auto-discover via the domain name."
+  default     = ""
+}
+
+variable "cloudflare_account_id" {
+  type        = string
+  description = "Cloudflare account ID. Optional, used only when the zone data source needs scoping."
+  default     = ""
 }
 
 variable "cloudflare_proxy" {
   type        = bool
   description = "Whether Cloudflare should proxy the DNS records."
   default     = true
+}
+
+variable "cloudflare_ssl_mode" {
+  type        = string
+  description = "Cloudflare SSL/TLS encryption mode (off, flexible, full, strict)."
+  default     = "strict"
 }

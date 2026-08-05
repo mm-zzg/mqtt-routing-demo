@@ -16,16 +16,11 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 - Terraform deployment path added
 - Cloudflare origin certificate flow wired
 - Public edge TLS delegated to Cloudflare when proxied
-- Client simulator UI project added for managing simulated clients and certificate inventory
-- AppHost launch settings added for local startup and dashboard discovery
-- AppHost local launch is configured to avoid the dashboard HTTP/proxy dependency during startup
-- AppHost requires the generated executable to be closed before rebuild/start because the output is locked while the process is running
-- Client simulator is still in-memory and needs to be upgraded to real MQTT transport and persistence
-- Cloudflare DNS records are now intended to be managed by Terraform alongside Azure resources
+- Client simulator UI project added, upgraded with real MQTT transport (MQTTnet) and SQLite persistence (EF Core) with TLS certificate support
+- AppHost launch settings added for local startup with dashboard telemetry disabled
+- Pre-build target added to AppHost .csproj to kill locked executable before rebuild
+- Cloudflare DNS zone management is fully declarative: zone auto-discovered via data source, DNS records, and SSL/security settings managed in Terraform
 
 ## Next implementation steps
-1. Add Cloudflare DNS zone and record management to Terraform so public hostnames, validation, and proxying are fully declarative.
-2. Upgrade the client simulator from in-memory simulation to real MQTT transport and persistence.
-
-## Immediate action
-- Implement Cloudflare DNS zone and record resources in Terraform.
+1. Validate end-to-end deployment with real Cloudflare + Azure infrastructure.
+2. Add monitoring and observability (Application Insights, structured logging).
