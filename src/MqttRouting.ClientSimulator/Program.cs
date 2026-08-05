@@ -5,8 +5,10 @@ using MqttRouting.ServiceDefaults;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddRazorPages();
+// Add Blazor Server services.
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
+
 builder.Services.AddServiceDefaults();
 
 var connectionString = builder.Configuration.GetConnectionString("ClientSimulator")
@@ -26,13 +28,12 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/Error");
 }
 
-app.UseRouting();
+app.UseStaticFiles();
+app.UseAntiforgery();
 
-app.UseAuthorization();
+app.MapRazorComponents<MqttRouting.ClientSimulator.Components.App>()
+   .AddInteractiveServerRenderMode();
 
-app.MapStaticAssets();
-app.MapRazorPages()
-   .WithStaticAssets();
 app.MapDefaultEndpoints();
 
 app.Run();

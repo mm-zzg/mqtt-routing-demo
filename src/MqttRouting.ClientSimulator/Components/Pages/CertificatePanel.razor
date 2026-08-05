@@ -1,0 +1,137 @@
+<div class="card">
+    <div class="card-header">Add Client Certificate</div>
+    <div class="card-body">
+        <EditForm Model="Model" OnValidSubmit="HandleAddCertificate">
+            <DataAnnotationsValidator />
+            <div class="mb-3">
+                <label for="cert-name" class="form-label">Name</label>
+                <InputText id="cert-name" class="form-control" @bind-Value="Model.Name" />
+                <ValidationMessage For="() => Model.Name" />
+            </div>
+            <div class="mb-3">
+                <label for="cert-pfx" class="form-label">PFX Base64</label>
+                <InputTextArea id="cert-pfx" class="form-control" rows="4" @bind-Value="Model.PfxBase64" />
+                <ValidationMessage For="() => Model.PfxBase64" />
+            </div>
+            <div class="mb-3">
+                <label for="cert-password" class="form-label">Password</label>
+                <InputText id="cert-password" type="password" class="form-control" @bind-Value="Model.Password" />
+                <ValidationMessage For="() => Model.Password" />
+            </div>
+            <button class="btn btn-primary" type="submit" disabled="@IsSaving">
+                @(IsSaving ? "Saving..." : "Save certificate")
+            </button>
+        </EditForm>
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Certificates</span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshCertificates" disabled="@IsLoading">
+            @(IsLoading ? "Loading..." : "Refresh")
+        </button>
+    </div>
+    <div class="card-body p-0">
+        @if (!Certificates.Any())
+        {
+            <p class="text-muted p-3 mb-0">No certificates stored yet.</p>
+        }
+        else
+        {
+            <table class="table table-sm mb-0">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Created</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var cert in Certificates)
+                    {
+                        <tr>
+                            <td>@cert.Name</td>
+                            <td>@cert.CreatedAt.ToLocalTime().ToString("u")</td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick="() => DeleteCertificate(cert)">
+                                    Delete
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Inject] private ClientSimulatorManager Manager { get; set; } = default!;
+
+    [Parameter] public EventCallback<string> OnCertificateAdded { get; set; }
+    [Parameter] public EventCallback<string> OnError { get; set; }
+
+    private CertificateInput Model { get; set; } = new();
+    private List<ClientCertificateRecord> Certificates { get; set; } = [];
+    private bool IsSaving;
+    private bool IsLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshCertificates();
+    }
+
+    private async Task RefreshCertificates()
+    {
+        try
+        {
+            IsLoading = true;
+            Certificates = await Manager.GetCertificatesAsync();
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to load certificates: {ex.Message}");
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task HandleAddCertificate()
+    {
+        try
+        {
+            IsSaving = true;
+            await Manager.AddCertificateAsync(Model);
+            Model = new CertificateInput();
+            await RefreshCertificates();
+            await OnCertificateAdded.InvokeAsync("Certificate added.");
+        }
+        catch (FormatException ex)
+        {
+            await OnError.InvokeAsync($"Invalid PFX base64: {ex.Message}");
+        }
+        catch (CryptographicException ex)
+        {
+            await OnError.InvokeAsync($"Invalid certificate or password: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to add certificate: {ex.Message}");
+        }
+        finally
+        {
+            IsSaving = false;
+        }
+    }
+
+    private async Task DeleteCertificate(ClientCertificateRecord cert)
+    {
+        // Would need a DeleteCertificateAsync method on the manager.
+        // For now, show a message that this isn't implemented.
+        await OnError.InvokeAsync("Certificate deletion is not implemented yet.");
+    }
+}

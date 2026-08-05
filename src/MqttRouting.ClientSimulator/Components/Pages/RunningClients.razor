@@ -1,0 +1,178 @@
+@implements IDisposable
+
+<div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Ongoing Clients</span>
+        <span class="badge bg-secondary">Auto-refresh @RefreshIntervalSeconds s</span>
+    </div>
+    <div class="card-body p-0">
+        @if (!Clients.Any())
+        {
+            <p class="text-muted p-3 mb-0">No clients configured. Create one to get started.</p>
+        }
+        else
+        {
+            <table class="table mb-0">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Broker</th>
+                        <th>Topic</th>
+                        <th>Status</th>
+                        <th>Publishes</th>
+                        <th>Last Activity</th>
+                        <th>Error</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var client in Clients)
+                    {
+                        <tr>
+                            <td>@client.Name</td>
+                            <td>@($"{client.BrokerHost}:{client.BrokerPort}")</td>
+                            <td>@client.Topic</td>
+                            <td>
+                                <span class="badge @StatusBadgeClass(client.Status)">@client.Status</span>
+                            </td>
+                            <td>@client.PublishCount</td>
+                            <td>@(client.LastPublishedAt?.ToLocalTime().ToString("u") ?? "-")</td>
+                            <td>
+                                @if (client.LastError is not null)
+                                {
+                                    <span class="text-danger" title="@client.LastError">
+                                        @(client.LastError.Length > 40 ? client.LastError[..40] + "..." : client.LastError)
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span>-</span>
+                                }
+                            </td>
+                            <td>
+                                <div class="d-flex gap-1">
+                                    <button class="btn btn-sm btn-success"
+                                            @onclick="() => StartClient(client.Id)"
+                                            disabled="client.Status is ClientStatus.Running or ClientStatus.Starting">
+                                        Start
+                                    </button>
+                                    <button class="btn btn-sm btn-warning"
+                                            @onclick="() => StopClient(client.Id)"
+                                            disabled="client.Status is not ClientStatus.Running">
+                                        Stop
+                                    </button>
+                                    <button class="btn btn-sm btn-danger"
+                                            @onclick="() => RemoveClient(client.Id)"
+                                            disabled="client.Status is ClientStatus.Running">
+                                        Remove
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Inject] private ClientSimulatorManager Manager { get; set; } = default!;
+
+    [Parameter] public EventCallback<string> OnError { get; set; }
+
+    private IReadOnlyList<ClientRuntimeSnapshot> Clients { get; set; } = [];
+    private PeriodicTimer? Timer;
+    private CancellationTokenSource? TimerCts;
+    private const int RefreshIntervalSeconds = 3;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshClients();
+        TimerCts = new CancellationTokenSource();
+        Timer = new PeriodicTimer(TimeSpan.FromSeconds(RefreshIntervalSeconds));
+        _ = RunTimerAsync(TimerCts.Token);
+    }
+
+    private async Task RunTimerAsync(CancellationToken cancellationToken)
+    {
+        while (Timer is not null && await Timer.WaitForNextTickAsync(cancellationToken))
+        {
+            try
+            {
+                Clients = Manager.GetClients();
+                await InvokeAsync(StateHasChanged);
+            }
+            catch (Exception ex)
+            {
+                await OnError.InvokeAsync($"Refresh error: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task RefreshClients()
+    {
+        try
+        {
+            Clients = Manager.GetClients();
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to load clients: {ex.Message}");
+        }
+    }
+
+    private async Task StartClient(string clientId)
+    {
+        try
+        {
+            await Manager.StartClientAsync(clientId, CancellationToken.None);
+            Clients = Manager.GetClients();
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to start client: {ex.Message}");
+        }
+    }
+
+    private async Task StopClient(string clientId)
+    {
+        try
+        {
+            await Manager.StopClientAsync(clientId);
+            Clients = Manager.GetClients();
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to stop client: {ex.Message}");
+        }
+    }
+
+    private async Task RemoveClient(string clientId)
+    {
+        try
+        {
+            await Manager.RemoveClientAsync(clientId);
+            Clients = Manager.GetClients();
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to remove client: {ex.Message}");
+        }
+    }
+
+    private static string StatusBadgeClass(ClientStatus status) => status switch
+    {
+        ClientStatus.Running => "bg-success",
+        ClientStatus.Starting => "bg-info",
+        ClientStatus.Faulted => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    public void Dispose()
+    {
+        TimerCts?.Cancel();
+        TimerCts?.Dispose();
+        Timer?.Dispose();
+    }
+}

@@ -13,6 +13,7 @@
 - Added pre-build target to kill running AppHost executable before rebuild/clean
 
 ## Next
+- Convert Client Simulator UI from Razor Pages to Blazor (Server-side rendering) with interactive components for certificate management, client config CRUD, and real-time client status
 - Keep AppHost local startup free of the dashboard HTTP/proxy dependency (already configured via empty env vars in launchSettings)
 
 ## Notes

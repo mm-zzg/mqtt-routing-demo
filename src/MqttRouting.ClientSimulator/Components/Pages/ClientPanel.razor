@@ -1,0 +1,105 @@
+<div class="card">
+    <div class="card-header">Create Simulated Client</div>
+    <div class="card-body">
+        <EditForm Model="Model" OnValidSubmit="HandleAddClient">
+            <DataAnnotationsValidator />
+            <div class="mb-3">
+                <label for="client-name" class="form-label">Name</label>
+                <InputText id="client-name" class="form-control" @bind-Value="Model.Name" />
+                <ValidationMessage For="() => Model.Name" />
+            </div>
+            <div class="row g-2">
+                <div class="col">
+                    <label for="client-host" class="form-label">Broker Host</label>
+                    <InputText id="client-host" class="form-control" @bind-Value="Model.BrokerHost" />
+                    <ValidationMessage For="() => Model.BrokerHost" />
+                </div>
+                <div class="col">
+                    <label for="client-port" class="form-label">Port</label>
+                    <InputNumber id="client-port" class="form-control" @bind-Value="Model.BrokerPort" />
+                    <ValidationMessage For="() => Model.BrokerPort" />
+                </div>
+            </div>
+            <div class="mb-3 mt-2">
+                <label for="client-topic" class="form-label">Topic</label>
+                <InputText id="client-topic" class="form-control" @bind-Value="Model.Topic" />
+                <ValidationMessage For="() => Model.Topic" />
+            </div>
+            <div class="mb-3">
+                <label for="client-interval" class="form-label">Publish Interval (seconds)</label>
+                <InputNumber id="client-interval" class="form-control" @bind-Value="Model.PublishIntervalSeconds" />
+                <ValidationMessage For="() => Model.PublishIntervalSeconds" />
+            </div>
+            <div class="mb-3">
+                <label for="client-cert" class="form-label">Certificate</label>
+                <InputSelect id="client-cert" class="form-select" @bind-Value="Model.CertificateId">
+                    <option value="">None</option>
+                    @foreach (var cert in Certificates)
+                    {
+                        <option value="@cert.Id">@cert.Name</option>
+                    }
+                </InputSelect>
+                <ValidationMessage For="() => Model.CertificateId" />
+            </div>
+            <button class="btn btn-primary" type="submit" disabled="@IsSaving">
+                @(IsSaving ? "Creating..." : "Create client")
+            </button>
+        </EditForm>
+    </div>
+</div>
+
+@code {
+    [Inject] private ClientSimulatorManager Manager { get; set; } = default!;
+
+    [Parameter] public EventCallback<string> OnClientCreated { get; set; }
+    [Parameter] public EventCallback<string> OnError { get; set; }
+
+    private ClientInput Model { get; set; } = new();
+    private List<ClientCertificateRecord> Certificates { get; set; } = [];
+    private bool IsSaving;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadCertificates();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await LoadCertificates();
+    }
+
+    private async Task LoadCertificates()
+    {
+        try
+        {
+            Certificates = await Manager.GetCertificatesAsync();
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to load certificates: {ex.Message}");
+        }
+    }
+
+    private async Task HandleAddClient()
+    {
+        try
+        {
+            IsSaving = true;
+            await Manager.AddClientAsync(Model);
+            Model = new ClientInput();
+            await OnClientCreated.InvokeAsync("Client profile created.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            await OnError.InvokeAsync(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to create client: {ex.Message}");
+        }
+        finally
+        {
+            IsSaving = false;
+        }
+    }
+}

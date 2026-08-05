@@ -1,0 +1,58 @@
+@page "/"
+@rendermode InteractiveServer
+
+<PageTitle>MQTT Client Simulator</PageTitle>
+
+<h1 class="display-6 mb-3">MQTT Client Simulator</h1>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+        @StatusMessage
+        <button type="button" class="btn-close" @onclick="() => StatusMessage = null" aria-label="Close"></button>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(ErrorMessage))
+{
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+        @ErrorMessage
+        <button type="button" class="btn-close" @onclick="() => ErrorMessage = null" aria-label="Close"></button>
+    </div>
+}
+
+<div class="row g-4">
+    <div class="col-lg-6">
+        <CertificatePanel OnCertificateAdded="OnCertificateChanged" OnError="SetError" />
+    </div>
+    <div class="col-lg-6">
+        <ClientPanel OnClientCreated="OnClientChanged" OnError="SetError" />
+    </div>
+</div>
+
+<div class="mt-4">
+    <RunningClients OnError="SetError" />
+</div>
+
+@code {
+    private string? StatusMessage;
+    private string? ErrorMessage;
+
+    private void SetError(string message)
+    {
+        ErrorMessage = message;
+        StatusMessage = null;
+    }
+
+    private void OnCertificateChanged(string message)
+    {
+        StatusMessage = message;
+        ErrorMessage = null;
+    }
+
+    private void OnClientChanged(string message)
+    {
+        StatusMessage = message;
+        ErrorMessage = null;
+    }
+}

@@ -16,7 +16,7 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 - Terraform deployment path added
 - Cloudflare origin certificate flow wired
 - Public edge TLS delegated to Cloudflare when proxied
-- Client simulator UI project added, upgraded with real MQTT transport (MQTTnet) and SQLite persistence (EF Core) with TLS certificate support
+- Client simulator UI project added, upgraded with real MQTT transport (MQTTnet) and SQLite persistence (EF Core) with TLS certificate support; UI framework is Blazor (Server-side rendering)
 - AppHost launch settings added for local startup with dashboard telemetry disabled
 - Pre-build target added to AppHost .csproj to kill locked executable before rebuild
 - Cloudflare DNS zone management is fully declarative: zone auto-discovered via data source, DNS records, and SSL/security settings managed in Terraform
