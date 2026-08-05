@@ -1,0 +1,55 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      TF_VAR_base_domain: ${{ vars.BASE_DOMAIN }}
+      TF_VAR_location: ${{ vars.AZURE_LOCATION || 'eastus' }}
+      TF_VAR_image_tag: ${{ github.sha }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        run: terraform -chdir=infra init
+
+      - name: Terraform bootstrap
+        run: terraform -chdir=infra apply -auto-approve -target=azurerm_resource_group.this -target=azurerm_log_analytics_workspace.this -target=azurerm_container_app_environment.this -target=azurerm_container_registry.this
+
+      - name: Build and push tenant plane image
+        run: |
+          ACR=$(terraform -chdir=infra output -raw container_registry_login_server)
+          az acr login --name "${ACR%%.*}"
+          docker build -f Dockerfile.tenant-plane -t "$ACR/tenant-plane:${GITHUB_SHA}" .
+          docker push "$ACR/tenant-plane:${GITHUB_SHA}"
+
+      - name: Build and push protocol transfer image
+        run: |
+          ACR=$(terraform -chdir=infra output -raw container_registry_login_server)
+          docker build -f Dockerfile.protocol-transfer -t "$ACR/protocol-transfer:${GITHUB_SHA}" .
+          docker push "$ACR/protocol-transfer:${GITHUB_SHA}"
+
+      - name: Terraform apply
+        run: terraform -chdir=infra apply -auto-approve
