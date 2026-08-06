@@ -407,4 +407,5 @@ resource "azurerm_container_app_custom_domain" "tenant" {
   name                                    = each.value
   container_app_id                        = azurerm_container_app.tenant[each.key].id
   container_app_environment_certificate_id = azurerm_container_app_environment_certificate.origin.id
+  certificate_binding_type                = "SniEnabled"
 }
