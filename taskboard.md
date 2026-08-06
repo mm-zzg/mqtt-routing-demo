@@ -25,6 +25,10 @@
 - ProtocolTransfer: rewritten as MQTT TCP gateway — accepts TCP MQTT on port 1883, parses CONNECT to extract client ID, routes to Ingress `ws://ingress:18000/mqtt/{tenant}` based on client ID prefix (`tenant1.` / `tenant2.`)
 - Ingress: added `/mqtt/{tenant}` WebSocket route that proxies to TenantPlane's `/mqtt` endpoint; route table now includes `Tenant` field
 - Updated AppHost configuration: ProtocolTransfer ListenPort=1883, IngressHost/IngressPort point to Ingress:18000
+- Renamed tenants from tenant1/tenant2 to tenantA/tenantB across AppHost, Ingress routes, and default simulator clients
+- ClientSimulator now auto-creates and auto-starts two default MQTT clients (tenantA.simulator, tenantB.simulator) connecting to ProtocolTransfer TCP :1883
+- ClientSimulator uses entity Id as MQTT client ID (instead of generated prefix) to support tenant-prefix routing
+- Declared TCP MQTT endpoints via `WithEndpoint(name: "mqtt", scheme: "tcp", ...)` in AppHost so Aspire DCP can register service-producer annotations for tenantA/tenantB brokers (1883/1884) and ProtocolTransfer gateway (1883)
 
 ## Next
 

@@ -50,6 +50,11 @@ ClientSimulator ──MQTT over TCP──► ProtocolTransfer ──MQTT over We
 | ClientSimulator   | —        | —              | 18110 |
 | ProtocolTransfer  | 1883     | —              | 18200 |
 | Ingress           | —        | 18000 (ws)     | 18000 |
-| TenantPlane (t1)  | 1883     | 18080 (ws)     | 18080 |
-| TenantPlane (t2)  | 1884     | 18081 (ws)     | 18081 |
+| TenantPlane (tA)  | 1883     | 18080 (ws)     | 18080 |
+| TenantPlane (tB)  | 1884     | 18081 (ws)     | 18081 |
+
+### Default clients
+The ClientSimulator automatically creates and starts two MQTT clients on startup:
+- **TenantA Simulator** — client ID `tenantA.simulator`, publishes to `tenantA/simulator/heartbeat`, connects to ProtocolTransfer TCP :1883
+- **TenantB Simulator** — client ID `tenantB.simulator`, publishes to `tenantB/simulator/heartbeat`, connects to ProtocolTransfer TCP :1883
 

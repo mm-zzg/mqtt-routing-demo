@@ -122,6 +122,52 @@ public sealed class ClientSimulatorManager
         _logger.LogInformation("Loaded {Count} persisted client configs.", configs.Count);
     }
 
+    /// <summary>
+    /// Ensures two default MQTT clients exist: one for tenantA and one for tenantB.
+    /// Both connect to the ProtocolTransfer TCP gateway.
+    /// </summary>
+    public async Task EnsureDefaultClientsAsync(string brokerHost, int brokerPort, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        var defaults = new[]
+        {
+            new { Name = "TenantA Simulator", ClientId = "tenantA.simulator", Topic = "tenantA/simulator/heartbeat" },
+            new { Name = "TenantB Simulator", ClientId = "tenantB.simulator", Topic = "tenantB/simulator/heartbeat" }
+        };
+
+        foreach (var d in defaults)
+        {
+            if (_clients.ContainsKey(d.ClientId))
+                continue;
+
+            var existing = await db.ClientConfigs.FindAsync(d.ClientId);
+            if (existing is null)
+            {
+                existing = new ClientConfigEntity
+                {
+                    Id = d.ClientId,
+                    Name = d.Name,
+                    BrokerHost = brokerHost,
+                    BrokerPort = brokerPort,
+                    Topic = d.Topic,
+                    PublishIntervalSeconds = 10
+                };
+                db.ClientConfigs.Add(existing);
+                await db.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation("Created default client {Name} ({ClientId}) → {Host}:{Port}", d.Name, d.ClientId, brokerHost, brokerPort);
+            }
+
+            var runtime = new ClientRuntime(
+                existing.Id, existing.Name, existing.BrokerHost, existing.BrokerPort,
+                existing.Topic, existing.PublishIntervalSeconds, existing.CertificateId,
+                null, _logger);
+
+            _clients.TryAdd(existing.Id, runtime);
+        }
+    }
+
     public Task StartClientAsync(string clientId, CancellationToken cancellationToken)
     {
         if (!_clients.TryGetValue(clientId, out var runtime))
@@ -172,15 +218,18 @@ public sealed class ClientSimulatorHostedService : IHostedService
     private readonly ClientSimulatorManager _manager;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ClientSimulatorHostedService> _logger;
+    private readonly IConfiguration _configuration;
 
     public ClientSimulatorHostedService(
         ClientSimulatorManager manager,
         IServiceScopeFactory scopeFactory,
-        ILogger<ClientSimulatorHostedService> logger)
+        ILogger<ClientSimulatorHostedService> logger,
+        IConfiguration configuration)
     {
         _manager = manager;
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _configuration = configuration;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -191,6 +240,26 @@ public sealed class ClientSimulatorHostedService : IHostedService
         _logger.LogInformation("Database ensured.");
 
         await _manager.LoadPersistedClientsAsync();
+
+        // Ensure two default clients exist and auto-start them
+        var brokerHost = _configuration["ClientSimulator:BrokerHost"] ?? "localhost";
+        var brokerPort = _configuration.GetValue<int>("ClientSimulator:BrokerPort");
+        if (brokerPort <= 0) brokerPort = 1883;
+
+        await _manager.EnsureDefaultClientsAsync(brokerHost, brokerPort, cancellationToken);
+
+        foreach (var snapshot in _manager.GetClients())
+        {
+            try
+            {
+                await _manager.StartClientAsync(snapshot.Id, cancellationToken);
+                _logger.LogInformation("Auto-started client {Name} ({Id})", snapshot.Name, snapshot.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to auto-start client {Name} ({Id})", snapshot.Name, snapshot.Id);
+            }
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => _manager.StopAllAsync();
@@ -371,7 +440,7 @@ internal sealed class ClientRuntime
         {
             var optionsBuilder = new MqttClientOptionsBuilder()
                 .WithTcpServer(BrokerHost, BrokerPort)
-                .WithClientId($"sim-{Id[..8]}")
+                .WithClientId(Id)
                 .WithCleanSession();
 
             if (_certificate is not null)
