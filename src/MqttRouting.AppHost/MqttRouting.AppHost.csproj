@@ -9,6 +9,7 @@
     <ProjectReference Include="..\MqttRouting.Ingress\MqttRouting.Ingress.csproj" />
     <ProjectReference Include="..\MqttRouting.ProtocolTransfer\MqttRouting.ProtocolTransfer.csproj" />
     <ProjectReference Include="..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj" />
+    <ProjectReference Include="..\MqttRouting.ClientSimulator\MqttRouting.ClientSimulator.csproj" />
   </ItemGroup>
 
   <Target Name="KillRunningAppHost" BeforeTargets="Build;Clean;Rebuild">

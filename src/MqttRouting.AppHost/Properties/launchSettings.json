@@ -8,11 +8,11 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "BaseDomain": "example.com",
-        "HTTP_PROXY ": "",
+        "HTTP_PROXY": "",
         "HTTPS_PROXY": "",
-        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "",
-        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "",
-        "ASPIRE_DASHBOARD_GRPC_ENDPOINT_URL": ""
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:18889",
+        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "http://localhost:18890",
+        "ASPIRE_DASHBOARD_GRPC_ENDPOINT_URL": "http://localhost:18889"
       }
     }
   }

@@ -1,6 +1,7 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
+using MQTTnet.Server;
 using MqttRouting.ServiceDefaults;
+using MqttRouting.TenantPlane;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddServiceDefaults();
@@ -13,10 +14,27 @@ builder.Services.AddOptions<TenantPlaneOptions>()
         options.BrokerPort = options.BrokerPort <= 0 ? 1883 : options.BrokerPort;
     });
 builder.Services.AddSingleton<TenantMessageStore>();
+builder.Services.AddSingleton<MqttBrokerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MqttBrokerService>());
 
 var app = builder.Build();
 
+app.UseWebSockets();
 app.MapDefaultEndpoints();
+
+// WebSocket MQTT endpoint — accepts raw MQTT-over-WebSocket connections and bridges to the local broker
+app.Map("/mqtt", async (HttpContext ctx, MqttBrokerService broker) =>
+{
+    if (!ctx.WebSockets.IsWebSocketRequest)
+    {
+        ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    using var ws = await ctx.WebSockets.AcceptWebSocketAsync("mqtt");
+    await broker.BridgeWebSocketAsync(ws, ctx.RequestAborted);
+});
+
 app.MapGet("/", (IOptions<TenantPlaneOptions> options) =>
 {
     var tenant = options.Value;
@@ -41,27 +59,7 @@ app.MapGet("/broker", (IOptions<TenantPlaneOptions> options) => Results.Ok(new
 {
     name = options.Value.TenantName,
     port = options.Value.BrokerPort,
-    mode = "simulated"
+    mode = "embedded"
 }));
 
 await app.RunAsync();
-
-sealed record TenantPlaneOptions
-{
-    public string TenantName { get; set; } = "tenant";
-    public string BaseDomain { get; set; } = "example.com";
-    public string? CustomDomain { get; set; }
-    public int HttpPort { get; set; } = 8080;
-    public int BrokerPort { get; set; } = 1883;
-}
-
-sealed record TenantMessage(string Id, string Topic, string Payload, DateTimeOffset CreatedAt);
-
-sealed class TenantMessageStore
-{
-    private readonly ConcurrentQueue<TenantMessage> _messages = new();
-
-    public void Add(TenantMessage message) => _messages.Enqueue(message);
-
-    public IReadOnlyCollection<TenantMessage> All() => _messages.ToArray();
-}

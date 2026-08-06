@@ -6,6 +6,7 @@
     <UserSecretsId>mqrouting-tenantplane</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="MQTTnet.Server" Version="5.*" />
     <ProjectReference Include="..\MqttRouting.ServiceDefaults\MqttRouting.ServiceDefaults.csproj" />
   </ItemGroup>
 </Project>
