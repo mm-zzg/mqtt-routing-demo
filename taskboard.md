@@ -29,6 +29,7 @@
 - ClientSimulator now auto-creates and auto-starts two default MQTT clients (tenantA.simulator, tenantB.simulator) connecting to ProtocolTransfer TCP :1883
 - ClientSimulator uses entity Id as MQTT client ID (instead of generated prefix) to support tenant-prefix routing
 - Declared TCP MQTT endpoints via `WithEndpoint(name: "mqtt", scheme: "tcp", ...)` in AppHost so Aspire DCP can register service-producer annotations for tenantA/tenantB brokers (1883/1884) and ProtocolTransfer gateway (1883)
+- Ingress now forwards the original client Host header to backend for both WebSocket MQTT and HTTP proxy paths so tenants see the tenant domain (e.g. `tenantA.example.com`) instead of `localhost`
 
 ## Next
 

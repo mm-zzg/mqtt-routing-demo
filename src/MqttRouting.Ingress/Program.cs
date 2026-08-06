@@ -48,6 +48,8 @@ app.Map("/mqtt", async (HttpContext ctx, IOptions<IngressOptions> options) =>
 
     using var backendSocket = new ClientWebSocket();
     var wsUri = new Uri($"ws://{route.BackendHost}:{route.BackendPort}/mqtt");
+    // Forward the original client Host header so the backend sees the tenant domain
+    backendSocket.Options.SetRequestHeader("Host", host);
 
     try
     {
@@ -112,6 +114,9 @@ async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFact
     var targetUri = new Uri($"http://{tenant.BackendHost}:{tenant.BackendPort}{context.Request.Path}{context.Request.QueryString}");
     using var requestMessage = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUri);
 
+    // Forward the original client Host header so the backend sees the tenant domain
+    requestMessage.Headers.Host = host;
+
     if (context.Request.ContentLength > 0 || context.Request.Body.CanRead)
     {
         requestMessage.Content = new StreamContent(context.Request.Body);
@@ -123,6 +128,10 @@ async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFact
 
     foreach (var header in context.Request.Headers)
     {
+        // Host is already set explicitly above; skip it to avoid duplication
+        if (string.Equals(header.Key, "Host", StringComparison.OrdinalIgnoreCase))
+            continue;
+
         if (!requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray()))
         {
             requestMessage.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
