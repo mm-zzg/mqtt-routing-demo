@@ -5,7 +5,7 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 
 ## Milestones
 1. Scaffold the Aspire solution and shared service defaults.
-2. Implement the tenant services, optional local ingress, and protocol transfer worker.
+2. Implement the tenant services, optional local ingress, and MQTT gateway worker.
 3. Add Terraform for Azure resources, DNS, and deployment inputs using native Container Apps ingress.
 4. Add Terraform-native certificate bundling with the `nijave/pki` provider for Cloudflare origin certs and Azure Container Apps.
 5. Add GitHub Actions for build and deploy automation.
@@ -29,32 +29,32 @@ Create a practical proof-of-concept for the diagram using .NET Aspire, Azure Con
 
 ### Topology
 ```
-ClientSimulator ──MQTT over TCP──► ProtocolTransfer ──MQTT over WebSocket──► Ingress ──MQTT over WebSocket──► TenantPlane
+Device ──MQTT over TCP──► Ingress ──MQTT over TCP──► MqttGateway ──MQTT over WebSocket──► TenantPlane
 ```
 
 ### Data flow
-1. **ClientSimulator** connects to **ProtocolTransfer** using plain MQTT over TCP.
-2. **ProtocolTransfer** acts as an MQTT gateway: it accepts TCP MQTT connections from clients, parses the MQTT CONNECT packet to extract the client ID, and determines the target tenant from the client ID prefix (e.g. `tenant1.` → tenant1). It then connects to **Ingress** via MQTT over WebSocket, setting the `Host` header to `{tenant}.{baseDomain}` (e.g. `tenant1.example.com`) so Ingress can route by domain name.
-3. **Ingress** receives MQTT over WebSocket connections at `/mqtt` and routes them by the Host header (same domain-based routing as HTTP requests). It proxies the WebSocket connection to the matching **TenantPlane**'s `/mqtt` endpoint.
+1. **Device** (or ClientSimulator) connects to **Ingress** via plain MQTT over TCP.
+2. **Ingress** acts as the public entry point: it listens on both TCP (for MQTT) and HTTP (for web traffic). MQTT-over-TCP connections are transparently proxied via raw TCP forwarding to **MqttGateway**. HTTP requests are routed to TenantPlanes by Host header.
+3. **MqttGateway** receives the MQTT-over-TCP connection from Ingress, reads the initial MQTT CONNECT packet, parses the client ID, and determines the target tenant from the client ID prefix (e.g. `tenantA.` → tenantA). It then opens a **WebSocket** connection to the matching **TenantPlane**'s `/mqtt` endpoint, forwards the buffered CONNECT bytes, and establishes a bidirectional byte pump (TCP ↔ WebSocket).
 4. **TenantPlane** runs an embedded MQTT broker that accepts both TCP and WebSocket MQTT connections (via loopback bridge). It stores published messages in its `TenantMessageStore`.
 
 ### Routing rule
-- MQTT connections whose client ID starts with `tenant1.` are routed to the TenantPlane instance for tenant1.
-- MQTT connections whose client ID starts with `tenant2.` are routed to the TenantPlane instance for tenant2.
-- Connections with an unrecognized prefix are rejected.
-- ProtocolTransfer connects to Ingress using the tenant's domain name as the Host header (e.g. `tenant1.example.com`), so Ingress routes the WebSocket connection to the correct TenantPlane using the same domain-based routing as HTTP requests.
+- MQTT connections whose client ID starts with `tenantA.` are routed to the TenantPlane instance for tenantA.
+- MQTT connections whose client ID starts with `tenantB.` are routed to the TenantPlane instance for tenantB.
+- Connections with an unrecognized prefix are rejected with CONNACK identifier rejected.
+- MqttGateway uses a route table (tenant name → backend host:port) to connect to the correct TenantPlane via WebSocket.
 
 ### Port assignments (local dev)
-| Service           | TCP MQTT | WebSocket MQTT | HTTP |
-|-------------------|----------|----------------|------|
-| ClientSimulator   | —        | —              | 18110 |
-| ProtocolTransfer  | 1883     | —              | 18200 |
-| Ingress           | —        | 18000 (ws)     | 18000 |
-| TenantPlane (tA)  | 1883     | 18080 (ws)     | 18080 |
-| TenantPlane (tB)  | 1884     | 18081 (ws)     | 18081 |
+| Service           | TCP MQTT | HTTP   |
+|-------------------|----------|--------|
+| Ingress           | 1883     | 18000  |
+| MqttGateway       | 1885     | 18200  |
+| TenantPlane (tA)  | 1883     | 18080  |
+| TenantPlane (tB)  | 1884     | 18081  |
+| ClientSimulator   | —        | 18110  |
 
 ### Default clients
 The ClientSimulator automatically creates and starts two MQTT clients on startup:
-- **TenantA Simulator** — client ID `tenantA.simulator`, publishes to `tenantA/simulator/heartbeat`, connects to ProtocolTransfer TCP :1883
-- **TenantB Simulator** — client ID `tenantB.simulator`, publishes to `tenantB/simulator/heartbeat`, connects to ProtocolTransfer TCP :1883
+- **TenantA Simulator** — client ID `tenantA.simulator`, publishes to `tenantA/simulator/heartbeat`, connects via MQTT-over-TCP to Ingress at localhost:1883
+- **TenantB Simulator** — client ID `tenantB.simulator`, publishes to `tenantB/simulator/heartbeat`, connects via MQTT-over-TCP to Ingress at localhost:1883
 

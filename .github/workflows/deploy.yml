@@ -47,11 +47,18 @@ jobs:
           docker build -f Dockerfile.tenant-plane -t "$ACR/tenant-plane:${GITHUB_SHA}" .
           docker push "$ACR/tenant-plane:${GITHUB_SHA}"
 
-      - name: Build and push protocol transfer image
+      - name: Build and push mqtt gateway image
         run: |
           ACR=$(terraform -chdir=infra output -raw container_registry_login_server)
-          docker build -f Dockerfile.protocol-transfer -t "$ACR/protocol-transfer:${GITHUB_SHA}" .
-          docker push "$ACR/protocol-transfer:${GITHUB_SHA}"
+          docker build -f Dockerfile.mqtt-gateway -t "$ACR/mqtt-gateway:${GITHUB_SHA}" .
+          docker push "$ACR/mqtt-gateway:${GITHUB_SHA}"
+
+      - name: Build and push ingress image
+        run: |
+          ACR=$(terraform -chdir=infra output -raw container_registry_login_server)
+          az acr login --name "${ACR%%.*}"
+          docker build -f Dockerfile.ingress -t "$ACR/ingress:${GITHUB_SHA}" .
+          docker push "$ACR/ingress:${GITHUB_SHA}"
 
       - name: Terraform apply
         run: terraform -chdir=infra apply -auto-approve

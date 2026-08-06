@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "MqttRouting.ProtocolTransfer": {
+    "MqttRouting.MqttGateway": {
       "commandName": "Project",
       "launchBrowser": true,
       "environmentVariables": {

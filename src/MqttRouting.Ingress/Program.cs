@@ -1,4 +1,5 @@
-using System.Net.WebSockets;
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Options;
 using MqttRouting.ServiceDefaults;
 
@@ -14,90 +15,33 @@ builder.Services.AddOptions<IngressOptions>()
     .PostConfigure(options =>
     {
         options.BaseDomain = string.IsNullOrWhiteSpace(options.BaseDomain) ? "example.com" : options.BaseDomain;
+        options.MqttGatewayHost = string.IsNullOrWhiteSpace(options.MqttGatewayHost) ? "localhost" : options.MqttGatewayHost;
+        options.MqttGatewayPort = options.MqttGatewayPort <= 0 ? 1883 : options.MqttGatewayPort;
+        options.MqttTcpListenPort = options.MqttTcpListenPort <= 0 ? 1883 : options.MqttTcpListenPort;
     });
+
+// TCP proxy: devices connect via MQTT-over-TCP, Ingress forwards raw TCP to MqttGateway
+builder.Services.AddHostedService<MqttTcpProxyService>();
 
 var app = builder.Build();
 
-app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
-
 app.MapDefaultEndpoints();
-app.MapGet("/info", (IOptions<IngressOptions> options) => Results.Ok(options.Value));
-
-// MQTT-over-WebSocket route: /mqtt
-// Routed by Host header (e.g. tenant1.example.com → tenant1 backend), same as HTTP requests.
-app.Map("/mqtt", async (HttpContext ctx, IOptions<IngressOptions> options) =>
-{
-    if (!ctx.WebSockets.IsWebSocketRequest)
+app.MapGet("/info", (IOptions<IngressOptions> options) =>
+    Results.Ok(new
     {
-        ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
-        return;
-    }
+        options.Value.BaseDomain,
+        mqttTcpListenPort = options.Value.MqttTcpListenPort,
+        mqttGateway = $"{options.Value.MqttGatewayHost}:{options.Value.MqttGatewayPort}",
+        routeTable = options.Value.RouteTable.Select(r => new { r.Tenant, r.Host })
+    }));
 
-    var host = ctx.Request.Host.Host;
-    var route = options.Value.RouteTable.FirstOrDefault(r =>
-        string.Equals(r.Host, host, StringComparison.OrdinalIgnoreCase));
-
-    if (route is null)
-    {
-        ctx.Response.StatusCode = StatusCodes.Status404NotFound;
-        await ctx.Response.WriteAsJsonAsync(new { error = "No route matched host", host });
-        return;
-    }
-
-    using var clientSocket = await ctx.WebSockets.AcceptWebSocketAsync("mqtt");
-
-    using var backendSocket = new ClientWebSocket();
-    var wsUri = new Uri($"ws://{route.BackendHost}:{route.BackendPort}/mqtt");
-    // Forward the original client Host header so the backend sees the tenant domain
-    backendSocket.Options.SetRequestHeader("Host", host);
-
-    try
-    {
-        await backendSocket.ConnectAsync(wsUri, ctx.RequestAborted);
-    }
-    catch
-    {
-        if (clientSocket.State == WebSocketState.Open)
-            await clientSocket.CloseAsync(WebSocketCloseStatus.EndpointUnavailable, "Backend unreachable", CancellationToken.None);
-        return;
-    }
-
-    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
-    var clientToBackend = PumpAsync(clientSocket, backendSocket, cts.Token);
-    var backendToClient = PumpAsync(backendSocket, clientSocket, cts.Token);
-
-    await Task.WhenAny(clientToBackend, backendToClient);
-    cts.Cancel();
-
-    try { await Task.WhenAll(clientToBackend, backendToClient); } catch { /* shut down */ }
-});
-
-// HTTP fallback proxy (existing behavior, routes by Host header)
+// HTTP fallback proxy (routes by Host header to TenantPlanes)
 app.MapFallback(ProxyHttpAsync);
 
-static async Task PumpAsync(WebSocket source, WebSocket target, CancellationToken ct)
-{
-    var buffer = new byte[8192];
-    try
-    {
-        while (source.State == WebSocketState.Open && !ct.IsCancellationRequested)
-        {
-            var result = await source.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                await target.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
-                return;
-            }
+await app.RunAsync();
 
-            if (target.State == WebSocketState.Open)
-                await target.SendAsync(new ArraySegment<byte>(buffer, 0, result.Count), result.MessageType, result.EndOfMessage, ct);
-        }
-    }
-    catch (OperationCanceledException) { }
-    catch (WebSocketException) { }
-}
-
-async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFactory, IOptions<IngressOptions> options)
+async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFactory,
+    IOptions<IngressOptions> options)
 {
     var host = context.Request.Host.Host;
     var tenant = options.Value.RouteTable.FirstOrDefault(route =>
@@ -111,10 +55,10 @@ async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFact
     }
 
     var client = httpClientFactory.CreateClient("proxy");
-    var targetUri = new Uri($"http://{tenant.BackendHost}:{tenant.BackendPort}{context.Request.Path}{context.Request.QueryString}");
+    var targetUri = new Uri(
+        $"{tenant.BackendScheme ?? "http"}://{tenant.BackendHost}:{tenant.BackendPort}{context.Request.Path}{context.Request.QueryString}");
     using var requestMessage = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUri);
 
-    // Forward the original client Host header so the backend sees the tenant domain
     requestMessage.Headers.Host = host;
 
     if (context.Request.ContentLength > 0 || context.Request.Body.CanRead)
@@ -122,13 +66,13 @@ async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFact
         requestMessage.Content = new StreamContent(context.Request.Body);
         if (!string.IsNullOrEmpty(context.Request.ContentType))
         {
-            requestMessage.Content.Headers.TryAddWithoutValidation("Content-Type", context.Request.ContentType);
+            requestMessage.Content.Headers.TryAddWithoutValidation("Content-Type",
+                context.Request.ContentType);
         }
     }
 
     foreach (var header in context.Request.Headers)
     {
-        // Host is already set explicitly above; skip it to avoid duplication
         if (string.Equals(header.Key, "Host", StringComparison.OrdinalIgnoreCase))
             continue;
 
@@ -138,7 +82,8 @@ async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFact
         }
     }
 
-    using var response = await client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+    using var response = await client.SendAsync(requestMessage,
+        HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
     context.Response.StatusCode = (int)response.StatusCode;
 
     foreach (var header in response.Headers)
@@ -155,9 +100,119 @@ async Task ProxyHttpAsync(HttpContext context, IHttpClientFactory httpClientFact
     await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
 }
 
+// ── TCP proxy: accepts MQTT-over-TCP from devices, forwards raw TCP to MqttGateway ──
+
+sealed class MqttTcpProxyService : IHostedService
+{
+    private readonly IngressOptions _options;
+    private readonly ILogger<MqttTcpProxyService> _logger;
+    private TcpListener? _listener;
+    private CancellationTokenSource? _cts;
+
+    public MqttTcpProxyService(IOptions<IngressOptions> options, ILogger<MqttTcpProxyService> logger)
+    {
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _listener = new TcpListener(IPAddress.Any, _options.MqttTcpListenPort);
+        _listener.Start();
+        _logger.LogInformation("MQTT TCP proxy listening on :{Port}, forwarding to {Host}:{BackendPort}",
+            _options.MqttTcpListenPort, _options.MqttGatewayHost, _options.MqttGatewayPort);
+
+        _ = AcceptLoopAsync(_cts.Token);
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        _cts?.Cancel();
+        _listener?.Stop();
+        return Task.CompletedTask;
+    }
+
+    private async Task AcceptLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var client = await _listener!.AcceptTcpClientAsync(ct);
+                _ = ProxyAsync(client, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (SocketException) { /* listener stopped */ }
+    }
+
+    private async Task ProxyAsync(TcpClient client, CancellationToken ct)
+    {
+        using var _ = client;
+        TcpClient? backend = null;
+
+        try
+        {
+            backend = new TcpClient();
+            await backend.ConnectAsync(_options.MqttGatewayHost, _options.MqttGatewayPort, ct);
+            _logger.LogInformation("MQTT TCP proxy: device connected, upstream to {Host}:{Port}",
+                _options.MqttGatewayHost, _options.MqttGatewayPort);
+
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var clientStream = client.GetStream();
+            var backendStream = backend.GetStream();
+
+            var clientToBackend = PumpAsync(clientStream, backendStream, linkedCts.Token);
+            var backendToClient = PumpAsync(backendStream, clientStream, linkedCts.Token);
+
+            await Task.WhenAny(clientToBackend, backendToClient);
+            linkedCts.Cancel();
+
+            try { await Task.WhenAll(clientToBackend, backendToClient); } catch { /* shutdown */ }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "MQTT TCP proxy: connection error");
+        }
+        finally
+        {
+            backend?.Dispose();
+        }
+    }
+
+    private static async Task PumpAsync(NetworkStream source, NetworkStream target, CancellationToken ct)
+    {
+        var buffer = new byte[8192];
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var bytesRead = await source.ReadAsync(buffer, ct);
+                if (bytesRead == 0) return;
+                await target.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+                await target.FlushAsync(ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
+    }
+}
+
 sealed record IngressOptions
 {
     public string BaseDomain { get; set; } = "example.com";
+
+    // TCP MQTT listen port (devices connect here with plain MQTT-over-TCP)
+    public int MqttTcpListenPort { get; set; } = 1883;
+
+    // MqttGateway TCP backend (MQTT-over-TCP)
+    public string MqttGatewayHost { get; set; } = "localhost";
+    public int MqttGatewayPort { get; set; } = 1883;
+
+    // TenantPlane route table (HTTP fallback)
     public List<RouteEntry> RouteTable { get; set; } = new();
 }
 
@@ -165,7 +220,7 @@ sealed record RouteEntry
 {
     public string Tenant { get; set; } = string.Empty;
     public string Host { get; set; } = string.Empty;
-    public string BackendScheme { get; set; } = "http";
+    public string? BackendScheme { get; set; } = "http";
     public string BackendHost { get; set; } = string.Empty;
     public int BackendPort { get; set; } = 8080;
 }

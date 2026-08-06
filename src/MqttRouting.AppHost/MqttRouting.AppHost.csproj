@@ -7,7 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\MqttRouting.Ingress\MqttRouting.Ingress.csproj" />
-    <ProjectReference Include="..\MqttRouting.ProtocolTransfer\MqttRouting.ProtocolTransfer.csproj" />
+    <ProjectReference Include="..\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj" />
     <ProjectReference Include="..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj" />
     <ProjectReference Include="..\MqttRouting.ClientSimulator\MqttRouting.ClientSimulator.csproj" />
   </ItemGroup>

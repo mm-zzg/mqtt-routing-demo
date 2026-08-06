@@ -6,7 +6,7 @@ This repo is a proof-of-concept for the architecture in the diagram:
 - tenant plane services for broker + HTTP listener
 - local-only custom ingress for debugging
 - Azure Container Apps native ingress for production traffic
-- protocol-transfer worker
+- MQTT gateway (TCP → WebSocket bridge)
 - client simulator UI for managing ongoing simulated MQTT clients and client certificates
 - Terraform for Azure Container Apps, DNS, and certificates
 - GitHub Actions for build and deploy automation

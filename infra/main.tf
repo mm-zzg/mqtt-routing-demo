@@ -9,13 +9,16 @@ locals {
   log_analytics_name   = "${var.name_prefix}-law"
   acr_name             = replace("${var.name_prefix}${substr(replace(replace(var.base_domain, ".", ""), "-", ""), 0, 12)}", "-", "")
   env_name             = "${var.name_prefix}-aca"
-  protocol_app_name    = "${var.name_prefix}-transfer"
+  gateway_app_name     = "${var.name_prefix}-gateway"
+  ingress_app_name     = "${var.name_prefix}-ingress"
   tenant_apps          = { for tenant in var.tenant_names : tenant => "${var.name_prefix}-${tenant}" }
   tenant_hosts         = { for tenant in var.tenant_names : tenant => "${tenant}.${var.base_domain}" }
   wildcard_host        = "*.${var.base_domain}"
   zone_id              = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : data.cloudflare_zone.this.id
   images = {
-    transfer = "${azurerm_container_registry.this.login_server}/protocol-transfer:${var.image_tag}"
+    gateway      = "${azurerm_container_registry.this.login_server}/mqtt-gateway:${var.image_tag}"
+    ingress     = "${azurerm_container_registry.this.login_server}/ingress:${var.image_tag}"
+    tenant_plane = "${azurerm_container_registry.this.login_server}/tenant-plane:${var.image_tag}"
   }
 }
 
@@ -141,8 +144,8 @@ resource "azurerm_role_assignment" "tenant_pull" {
   principal_id         = each.value.identity[0].principal_id
 }
 
-resource "azurerm_container_app" "protocol_transfer" {
-  name                         = local.protocol_app_name
+resource "azurerm_container_app" "mqtt_gateway" {
+  name                         = local.gateway_app_name
   resource_group_name          = azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
@@ -158,48 +161,162 @@ resource "azurerm_container_app" "protocol_transfer" {
 
   template {
     container {
-      name   = "protocol-transfer"
-      image  = local.images.transfer
+      name   = "mqtt-gateway"
+      image  = local.images.gateway
       cpu    = 0.25
       memory = "0.5Gi"
 
       env {
-        name  = "ProtocolTransfer__Brokers__0__Name"
+        name  = "MqttGateway__BaseDomain"
+        value = var.base_domain
+      }
+
+      env {
+        name  = "MqttGateway__MqttTcpListenPort"
+        value = "1883"
+      }
+
+      env {
+        name  = "MqttGateway__RouteTable__0__Tenant"
         value = var.tenant_names[0]
       }
 
       env {
-        name  = "ProtocolTransfer__Brokers__0__Host"
+        name  = "MqttGateway__RouteTable__0__Host"
         value = azurerm_container_app.tenant[var.tenant_names[0]].latest_revision_fqdn
       }
 
       env {
-        name  = "ProtocolTransfer__Brokers__0__Port"
-        value = "1883"
+        name  = "MqttGateway__RouteTable__0__Port"
+        value = "8080"
       }
 
       env {
-        name  = "ProtocolTransfer__Brokers__1__Name"
+        name  = "MqttGateway__RouteTable__1__Tenant"
         value = var.tenant_names[1]
       }
 
       env {
-        name  = "ProtocolTransfer__Brokers__1__Host"
+        name  = "MqttGateway__RouteTable__1__Host"
         value = azurerm_container_app.tenant[var.tenant_names[1]].latest_revision_fqdn
       }
 
       env {
-        name  = "ProtocolTransfer__Brokers__1__Port"
-        value = "1883"
+        name  = "MqttGateway__RouteTable__1__Port"
+        value = "8080"
       }
     }
   }
 }
 
-resource "azurerm_role_assignment" "transfer_pull" {
+resource "azurerm_role_assignment" "gateway_pull" {
   scope                = azurerm_container_registry.this.id
   role_definition_name = "AcrPull"
-  principal_id         = azurerm_container_app.protocol_transfer.identity[0].principal_id
+  principal_id         = azurerm_container_app.mqtt_gateway.identity[0].principal_id
+}
+
+// Ingress: public-facing entry point for devices.
+// MQTT-over-TCP exposed on port 1883; HTTP proxy on port 8080 (internal health).
+resource "azurerm_container_app" "ingress" {
+  name                         = local.ingress_app_name
+  resource_group_name          = azurerm_resource_group.this.name
+  container_app_environment_id = azurerm_container_app_environment.this.id
+  revision_mode                = "Single"
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  registry {
+    server   = azurerm_container_registry.this.login_server
+    identity = "System"
+  }
+
+  template {
+    container {
+      name   = "ingress"
+      image  = local.images.ingress
+      cpu    = 0.25
+      memory = "0.5Gi"
+
+      env {
+        name  = "Ingress__BaseDomain"
+        value = var.base_domain
+      }
+
+      env {
+        name  = "Ingress__MqttTcpListenPort"
+        value = "1883"
+      }
+
+      env {
+        name  = "Ingress__MqttGatewayHost"
+        value = azurerm_container_app.mqtt_gateway.latest_revision_fqdn
+      }
+
+      env {
+        name  = "Ingress__MqttGatewayPort"
+        value = "1883"
+      }
+
+      env {
+        name  = "Ingress__RouteTable__0__Tenant"
+        value = var.tenant_names[0]
+      }
+
+      env {
+        name  = "Ingress__RouteTable__0__Host"
+        value = local.tenant_hosts[var.tenant_names[0]]
+      }
+
+      env {
+        name  = "Ingress__RouteTable__0__BackendHost"
+        value = azurerm_container_app.tenant[var.tenant_names[0]].latest_revision_fqdn
+      }
+
+      env {
+        name  = "Ingress__RouteTable__0__BackendPort"
+        value = "8080"
+      }
+
+      env {
+        name  = "Ingress__RouteTable__1__Tenant"
+        value = var.tenant_names[1]
+      }
+
+      env {
+        name  = "Ingress__RouteTable__1__Host"
+        value = local.tenant_hosts[var.tenant_names[1]]
+      }
+
+      env {
+        name  = "Ingress__RouteTable__1__BackendHost"
+        value = azurerm_container_app.tenant[var.tenant_names[1]].latest_revision_fqdn
+      }
+
+      env {
+        name  = "Ingress__RouteTable__1__BackendPort"
+        value = "8080"
+      }
+    }
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 1883
+    transport        = "tcp"
+
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+}
+
+resource "azurerm_role_assignment" "ingress_pull" {
+  scope                = azurerm_container_registry.this.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_container_app.ingress.identity[0].principal_id
 }
 
 resource "azurerm_dns_zone" "this" {

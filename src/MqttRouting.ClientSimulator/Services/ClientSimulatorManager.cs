@@ -124,7 +124,7 @@ public sealed class ClientSimulatorManager
 
     /// <summary>
     /// Ensures two default MQTT clients exist: one for tenantA and one for tenantB.
-    /// Both connect to the ProtocolTransfer TCP gateway.
+    /// Both connect to the MqttGateway TCP gateway.
     /// </summary>
     public async Task EnsureDefaultClientsAsync(string brokerHost, int brokerPort, CancellationToken cancellationToken)
     {

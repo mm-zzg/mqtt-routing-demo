@@ -21,9 +21,29 @@ builder.AddProject("tenantB", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPla
     .WithEnvironment("TenantPlane__HttpPort", "18081")
     .WithEnvironment("TenantPlane__BrokerPort", "1884");
 
+// MqttGateway: receives MQTT-over-TCP from Ingress, parses CONNECT,
+// extracts tenant from client ID, bridges TCP → WebSocket to TenantPlane.
+builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj")
+    .WithHttpEndpoint(port: 18200, targetPort: 18200)
+    .WithEndpoint(port: 1885, targetPort: 1885, scheme: "tcp", name: "mqtt-tcp")
+    .WithEnvironment("MqttGateway__BaseDomain", baseDomain)
+    .WithEnvironment("MqttGateway__MqttTcpListenPort", "1885")
+    .WithEnvironment("MqttGateway__RouteTable__0__Tenant", "tenantA")
+    .WithEnvironment("MqttGateway__RouteTable__0__Host", "localhost")
+    .WithEnvironment("MqttGateway__RouteTable__0__Port", "18080")
+    .WithEnvironment("MqttGateway__RouteTable__1__Tenant", "tenantB")
+    .WithEnvironment("MqttGateway__RouteTable__1__Host", "localhost")
+    .WithEnvironment("MqttGateway__RouteTable__1__Port", "18081");
+
+// Ingress: public-facing entry point. HTTP for web traffic, TCP for MQTT.
+// Devices connect with MQTT-over-TCP; Ingress proxies raw TCP to MqttGateway.
 builder.AddProject("ingress", @"..\MqttRouting.Ingress\MqttRouting.Ingress.csproj")
     .WithHttpEndpoint(port: 18000, targetPort: 18000)
+    .WithEndpoint(port: 1883, targetPort: 1883, scheme: "tcp", name: "mqtt-tcp")
     .WithEnvironment("Ingress__BaseDomain", baseDomain)
+    .WithEnvironment("Ingress__MqttTcpListenPort", "1883")
+    .WithEnvironment("Ingress__MqttGatewayHost", "localhost")
+    .WithEnvironment("Ingress__MqttGatewayPort", "1885")
     .WithEnvironment("Ingress__RouteTable__0__Tenant", "tenantA")
     .WithEnvironment("Ingress__RouteTable__0__Host", $"tenantA.{baseDomain}")
     .WithEnvironment("Ingress__RouteTable__0__BackendHost", "localhost")
@@ -33,14 +53,7 @@ builder.AddProject("ingress", @"..\MqttRouting.Ingress\MqttRouting.Ingress.cspro
     .WithEnvironment("Ingress__RouteTable__1__BackendHost", "localhost")
     .WithEnvironment("Ingress__RouteTable__1__BackendPort", "18081");
 
-builder.AddProject("protocol-transfer", @"..\MqttRouting.ProtocolTransfer\MqttRouting.ProtocolTransfer.csproj")
-    .WithHttpEndpoint(port: 18200, targetPort: 18200)
-    .WithEndpoint(port: 1883, targetPort: 1883, scheme: "tcp", name: "mqtt")
-    .WithEnvironment("ProtocolTransfer__ListenPort", "1883")
-    .WithEnvironment("ProtocolTransfer__IngressHost", "localhost")
-    .WithEnvironment("ProtocolTransfer__IngressPort", "18000")
-    .WithEnvironment("ProtocolTransfer__BaseDomain", baseDomain);
-
+// ClientSimulator: connects to Ingress via MQTT-over-TCP
 builder.AddProject("client-simulator", @"..\MqttRouting.ClientSimulator\MqttRouting.ClientSimulator.csproj")
     .WithHttpEndpoint(port: 18110, targetPort: 18110)
     .WithEnvironment("ClientSimulator__BrokerHost", "localhost")

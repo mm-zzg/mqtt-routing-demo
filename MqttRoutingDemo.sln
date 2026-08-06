@@ -11,7 +11,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MqttRouting.TenantPlane", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MqttRouting.Ingress", "src\MqttRouting.Ingress\MqttRouting.Ingress.csproj", "{9D1B2E1E-EDC6-4BE8-9E11-8C0F5F8C1B1A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MqttRouting.ProtocolTransfer", "src\MqttRouting.ProtocolTransfer\MqttRouting.ProtocolTransfer.csproj", "{D0B9C0B1-8D4C-4F0F-8A8A-8C5A6D4D5A21}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MqttRouting.MqttGateway", "src\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj", "{D0B9C0B1-8D4C-4F0F-8A8A-8C5A6D4D5A21}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
