@@ -14,8 +14,11 @@ builder.Services.AddOptions<IngressOptions>()
 var app = builder.Build();
 
 app.MapDefaultEndpoints();
-app.MapGet("/", (IOptions<IngressOptions> options) => Results.Ok(options.Value));
+
+app.MapGet("/__routes", (IOptions<IngressOptions> options) => Results.Ok(options.Value));
 app.MapFallback(ProxyAsync);
+
+await app.RunAsync();
 
 async Task ProxyAsync(HttpContext context, IHttpClientFactory httpClientFactory, IOptions<IngressOptions> options)
 {

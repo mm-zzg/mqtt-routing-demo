@@ -3,11 +3,11 @@
     "MqttRouting.AppHost": {
       "commandName": "Project",
       "dotnetRunMessages": true,
-      "launchBrowser": false,
+      "launchBrowser": true,
       "applicationUrl": "https://localhost:17192;http://localhost:15192",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
-        "BaseDomain": "example.com",
+        "BaseDomain": "localtest.me",
         "HTTP_PROXY ": "",
         "HTTPS_PROXY": "",
         "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "",
