@@ -34,8 +34,17 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
 
+      - name: Ensure Terraform state backend
+        working-directory: infra
+        run: |
+          chmod +x ./bootstrap-tfstate.sh
+          ./bootstrap-tfstate.sh
+
       - name: Terraform init
-        run: terraform -chdir=infra init
+        run: |
+          terraform -chdir=infra init \
+            -backend-config="resource_group_name=$TF_STATE_RG" \
+            -backend-config="storage_account_name=$TF_STATE_SA"
 
       - name: Terraform bootstrap
         run: terraform -chdir=infra apply -auto-approve -target=azurerm_resource_group.this -target=azurerm_log_analytics_workspace.this -target=azurerm_container_app_environment.this -target=azurerm_container_registry.this
