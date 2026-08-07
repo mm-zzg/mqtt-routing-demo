@@ -64,23 +64,23 @@ resource "pki_bundle" "origin_pfx" {
 
 resource "azurerm_log_analytics_workspace" "this" {
   name                = local.log_analytics_name
-  location            = azurerm_resource_group.this.location
-  resource_group_name = azurerm_resource_group.this.name
+  location            = data.azurerm_resource_group.this.location
+  resource_group_name = data.azurerm_resource_group.this.name
   sku                 = "PerGB2018"
   retention_in_days   = 30
 }
 
 resource "azurerm_container_app_environment" "this" {
   name                       = local.env_name
-  location                   = azurerm_resource_group.this.location
-  resource_group_name        = azurerm_resource_group.this.name
+  location                   = data.azurerm_resource_group.this.location
+  resource_group_name        = data.azurerm_resource_group.this.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
 }
 
 resource "azurerm_container_registry" "this" {
   name                = local.acr_name
-  resource_group_name  = azurerm_resource_group.this.name
-  location            = azurerm_resource_group.this.location
+  resource_group_name = data.azurerm_resource_group.this.name
+  location            = data.azurerm_resource_group.this.location
   sku                 = "Basic"
   admin_enabled       = false
 }
@@ -88,7 +88,7 @@ resource "azurerm_container_registry" "this" {
 resource "azurerm_container_app" "tenant" {
   for_each                     = local.tenant_apps
   name                         = each.value
-  resource_group_name          = azurerm_resource_group.this.name
+  resource_group_name          = data.azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
 
@@ -146,7 +146,7 @@ resource "azurerm_role_assignment" "tenant_pull" {
 
 resource "azurerm_container_app" "mqtt_gateway" {
   name                         = local.gateway_app_name
-  resource_group_name          = azurerm_resource_group.this.name
+  resource_group_name          = data.azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
 
@@ -219,7 +219,7 @@ resource "azurerm_role_assignment" "gateway_pull" {
 // MQTT-over-TCP exposed on port 1883; HTTP proxy on port 8080 (internal health).
 resource "azurerm_container_app" "ingress" {
   name                         = local.ingress_app_name
-  resource_group_name          = azurerm_resource_group.this.name
+  resource_group_name          = data.azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
 
@@ -321,7 +321,7 @@ resource "azurerm_role_assignment" "ingress_pull" {
 
 resource "azurerm_dns_zone" "this" {
   name                = var.base_domain
-  resource_group_name = azurerm_resource_group.this.name
+  resource_group_name = data.azurerm_resource_group.this.name
 }
 
 resource "cloudflare_dns_record" "tenant" {
@@ -376,7 +376,7 @@ resource "azurerm_dns_cname_record" "tenant" {
   for_each            = local.tenant_hosts
   name                = each.key
   zone_name           = azurerm_dns_zone.this.name
-  resource_group_name = azurerm_resource_group.this.name
+  resource_group_name = data.azurerm_resource_group.this.name
   ttl                 = 300
   record              = azurerm_container_app.tenant[each.key].latest_revision_fqdn
 }
@@ -385,7 +385,7 @@ resource "azurerm_dns_txt_record" "tenant_verification" {
   for_each            = local.tenant_hosts
   name                = "asuid.${each.key}"
   zone_name           = azurerm_dns_zone.this.name
-  resource_group_name = azurerm_resource_group.this.name
+  resource_group_name = data.azurerm_resource_group.this.name
   ttl                 = 300
 
   record {
