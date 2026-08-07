@@ -55,11 +55,12 @@ resource "random_password" "origin_pfx" {
 # Azure Container App environment certificates need a PKCS#12 bundle.
 # We use password encoding so the private key is included (required for TLS).
 resource "pki_bundle" "origin_pfx" {
-  format          = "pkcs12"
-  pkcs12_encoding = "password"
-  password        = random_password.origin_pfx.result
-  certificate_pem = cloudflare_origin_ca_certificate.origin.certificate
-  private_key_pem = tls_private_key.origin.private_key_pem
+  format              = "pkcs12"
+  pkcs12_encoding     = "modern"
+  password_wo         = random_password.origin_pfx.result
+  password_wo_version = 1
+  certificate_pem     = cloudflare_origin_ca_certificate.origin.certificate
+  private_key_pem     = tls_private_key.origin.private_key_pem
 }
 
 resource "azurerm_log_analytics_workspace" "this" {
