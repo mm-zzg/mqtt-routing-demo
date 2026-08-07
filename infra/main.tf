@@ -66,6 +66,10 @@ resource "terraform_data" "origin_pfx_upload" {
   }
 
   provisioner "local-exec" {
+    interpreter = ["/usr/bin/env", "bash", "-c"]
+    environment = {
+      ORIGIN_PFX_PASSWORD = random_password.origin_pfx.result
+    }
     command = <<-EOT
       set -euo pipefail
 
@@ -79,7 +83,7 @@ resource "terraform_data" "origin_pfx_upload" {
         -inkey .origin.key \
         -in .origin.crt \
         -name origin \
-        -password pass:${random_password.origin_pfx.result} \
+        -password pass:"$ORIGIN_PFX_PASSWORD" \
         -out .origin.pfx
 
       # Upload (or update) the certificate in the Container App environment.
@@ -88,7 +92,7 @@ resource "terraform_data" "origin_pfx_upload" {
         --environment "${local.env_name}" \
         --certificate-file .origin.pfx \
         --certificate-name "${var.name_prefix}-origin" \
-        --password "${random_password.origin_pfx.result}" \
+        --password "$ORIGIN_PFX_PASSWORD" \
         --output none
     EOT
   }
@@ -103,6 +107,7 @@ resource "terraform_data" "origin_host_bindings" {
   }
 
   provisioner "local-exec" {
+    interpreter = ["/usr/bin/env", "bash", "-c"]
     command = <<-EOT
       set -euo pipefail
 
