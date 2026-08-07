@@ -13,6 +13,8 @@ locals {
   acr_name             = replace("${var.name_prefix}${substr(replace(replace(var.base_domain, ".", ""), "-", ""), 0, 12)}", "-", "")
   container_apps_uai_name = "${var.name_prefix}-aca-pull"
   env_name             = "${var.name_prefix}-aca"
+  vnet_name            = "${var.name_prefix}-aca-vnet"
+  infra_subnet_name    = "${var.name_prefix}-aca-infra"
   gateway_app_name     = "${var.name_prefix}-gateway"
   tenant_apps          = { for tenant in var.tenant_names : tenant => "${var.name_prefix}-${tenant}" }
   tenant_hosts         = { for tenant in var.tenant_names : tenant => "${tenant}.${var.base_domain}" }
@@ -112,11 +114,37 @@ resource "azurerm_log_analytics_workspace" "this" {
   retention_in_days   = 30
 }
 
+resource "azurerm_virtual_network" "container_apps" {
+  name                = local.vnet_name
+  location            = data.azurerm_resource_group.this.location
+  resource_group_name = data.azurerm_resource_group.this.name
+  address_space       = [var.container_apps_vnet_cidr]
+}
+
+resource "azurerm_subnet" "container_apps_infra" {
+  name                 = local.infra_subnet_name
+  resource_group_name  = data.azurerm_resource_group.this.name
+  virtual_network_name = azurerm_virtual_network.container_apps.name
+  address_prefixes     = [var.container_apps_infra_subnet_cidr]
+
+  delegation {
+    name = "containerapps-delegation"
+
+    service_delegation {
+      name = "Microsoft.App/environments"
+      actions = [
+        "Microsoft.Network/virtualNetworks/subnets/join/action"
+      ]
+    }
+  }
+}
+
 resource "azurerm_container_app_environment" "this" {
   name                       = local.env_name
   location                   = data.azurerm_resource_group.this.location
   resource_group_name        = data.azurerm_resource_group.this.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+  infrastructure_subnet_id   = azurerm_subnet.container_apps_infra.id
 }
 
 resource "azurerm_container_registry" "this" {

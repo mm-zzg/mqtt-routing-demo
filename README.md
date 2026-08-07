@@ -21,7 +21,7 @@ This repo is a proof-of-concept for the architecture in the diagram:
 
 ## Azure deployment
 
-The Terraform layer provisions the Azure Container Apps environment, ACR, DNS zone, custom domains, and a Cloudflare Origin CA certificate bundled to PFX for Azure Container Apps. The `MqttRouting.Ingress` project stays local-only and is not part of the Azure deployment.
+The Terraform layer provisions the Azure Container Apps environment, a custom VNet/subnet for Container Apps infrastructure, ACR, DNS zone, custom domains, and a Cloudflare Origin CA certificate bundled to PFX for Azure Container Apps. The `MqttRouting.Ingress` project stays local-only and is not part of the Azure deployment.
 
 ## Deployment permissions
 

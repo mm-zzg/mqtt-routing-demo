@@ -56,3 +56,15 @@ variable "cloudflare_ssl_mode" {
   description = "Cloudflare SSL/TLS encryption mode (off, flexible, full, strict)."
   default     = "strict"
 }
+
+variable "container_apps_vnet_cidr" {
+  type        = string
+  description = "Address space CIDR for the Container Apps VNet used for external TCP ingress support."
+  default     = "10.70.0.0/16"
+}
+
+variable "container_apps_infra_subnet_cidr" {
+  type        = string
+  description = "Delegated subnet CIDR for the Container Apps Environment infrastructure subnet."
+  default     = "10.70.0.0/23"
+}
