@@ -11,6 +11,7 @@ data "azurerm_resource_group" "this" {
 locals {
   log_analytics_name   = "${var.name_prefix}-law"
   acr_name             = replace("${var.name_prefix}${substr(replace(replace(var.base_domain, ".", ""), "-", ""), 0, 12)}", "-", "")
+  container_apps_uai_name = "${var.name_prefix}-aca-pull"
   env_name             = "${var.name_prefix}-aca"
   gateway_app_name     = "${var.name_prefix}-gateway"
   ingress_app_name     = "${var.name_prefix}-ingress"
@@ -128,20 +129,34 @@ resource "azurerm_container_registry" "this" {
   admin_enabled       = false
 }
 
+resource "azurerm_user_assigned_identity" "container_apps" {
+  name                = local.container_apps_uai_name
+  resource_group_name = data.azurerm_resource_group.this.name
+  location            = data.azurerm_resource_group.this.location
+}
+
+resource "azurerm_role_assignment" "container_apps_pull" {
+  scope                = azurerm_container_registry.this.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_user_assigned_identity.container_apps.principal_id
+}
+
 resource "azurerm_container_app" "tenant" {
   for_each                     = local.tenant_apps
   name                         = each.value
   resource_group_name          = data.azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
+  depends_on                   = [azurerm_role_assignment.container_apps_pull]
 
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.container_apps.id]
   }
 
   registry {
     server   = azurerm_container_registry.this.login_server
-    identity = "System"
+    identity = azurerm_user_assigned_identity.container_apps.id
   }
 
   template {
@@ -180,26 +195,21 @@ resource "azurerm_container_app" "tenant" {
   }
 }
 
-resource "azurerm_role_assignment" "tenant_pull" {
-  for_each             = azurerm_container_app.tenant
-  scope                = azurerm_container_registry.this.id
-  role_definition_name = "AcrPull"
-  principal_id         = each.value.identity[0].principal_id
-}
-
 resource "azurerm_container_app" "mqtt_gateway" {
   name                         = local.gateway_app_name
   resource_group_name          = data.azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
+  depends_on                   = [azurerm_role_assignment.container_apps_pull]
 
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.container_apps.id]
   }
 
   registry {
     server   = azurerm_container_registry.this.login_server
-    identity = "System"
+    identity = azurerm_user_assigned_identity.container_apps.id
   }
 
   template {
@@ -252,12 +262,6 @@ resource "azurerm_container_app" "mqtt_gateway" {
   }
 }
 
-resource "azurerm_role_assignment" "gateway_pull" {
-  scope                = azurerm_container_registry.this.id
-  role_definition_name = "AcrPull"
-  principal_id         = azurerm_container_app.mqtt_gateway.identity[0].principal_id
-}
-
 # Ingress: public-facing entry point for devices.
 # MQTT-over-TCP exposed on port 1883; HTTP proxy on port 8080 (internal health).
 resource "azurerm_container_app" "ingress" {
@@ -265,14 +269,16 @@ resource "azurerm_container_app" "ingress" {
   resource_group_name          = data.azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
+  depends_on                   = [azurerm_role_assignment.container_apps_pull]
 
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.container_apps.id]
   }
 
   registry {
     server   = azurerm_container_registry.this.login_server
-    identity = "System"
+    identity = azurerm_user_assigned_identity.container_apps.id
   }
 
   template {
@@ -354,12 +360,6 @@ resource "azurerm_container_app" "ingress" {
       percentage      = 100
     }
   }
-}
-
-resource "azurerm_role_assignment" "ingress_pull" {
-  scope                = azurerm_container_registry.this.id
-  role_definition_name = "AcrPull"
-  principal_id         = azurerm_container_app.ingress.identity[0].principal_id
 }
 
 resource "azurerm_dns_zone" "this" {
