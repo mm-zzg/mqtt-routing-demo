@@ -89,7 +89,7 @@ resource "terraform_data" "origin_pfx_upload" {
       # Upload (or update) the certificate in the Container App environment.
       az containerapp env certificate upload \
         --resource-group "${data.azurerm_resource_group.this.name}" \
-        --environment "${local.env_name}" \
+        --name "${local.env_name}" \
         --certificate-file .origin.pfx \
         --certificate-name "${var.name_prefix}-origin" \
         --password "$ORIGIN_PFX_PASSWORD" \
