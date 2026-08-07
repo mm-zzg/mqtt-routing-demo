@@ -4,7 +4,7 @@ This repo is a proof-of-concept for the architecture in the diagram:
 
 - .NET Aspire AppHost for local orchestration
 - tenant plane services for broker + HTTP listener
-- local-only custom ingress for debugging
+- local-only custom ingress simulator for Azure Container Apps ingress; it is not deployed to Azure
 - Azure Container Apps native ingress for production traffic
 - MQTT gateway (TCP → WebSocket bridge)
 - client simulator UI for managing ongoing simulated MQTT clients and client certificates
@@ -21,7 +21,11 @@ This repo is a proof-of-concept for the architecture in the diagram:
 
 ## Azure deployment
 
-The Terraform layer provisions the Azure Container Apps environment, ACR, DNS zone, custom domains, and a Cloudflare Origin CA certificate bundled to PFX for Azure Container Apps.
+The Terraform layer provisions the Azure Container Apps environment, ACR, DNS zone, custom domains, and a Cloudflare Origin CA certificate bundled to PFX for Azure Container Apps. The `MqttRouting.Ingress` project stays local-only and is not part of the Azure deployment.
+
+## Deployment permissions
+
+The GitHub Actions service principal used by `AZURE_CLIENT_ID` must have permission to create role assignments at the resource-group or subscription scope before Terraform can create the `AcrPull` binding for the user-assigned identity. In practice, grant that principal `User Access Administrator` or `Owner` on the deployment scope once, then keep the Terraform-managed `AcrPull` assignment in place.
 
 ## Public edge model
 

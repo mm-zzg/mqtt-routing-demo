@@ -57,12 +57,5 @@ jobs:
           docker build -f Dockerfile.mqtt-gateway -t "$ACR/mqtt-gateway:${GITHUB_SHA}" .
           docker push "$ACR/mqtt-gateway:${GITHUB_SHA}"
 
-      - name: Build and push ingress image
-        run: |
-          ACR=$(terraform -chdir=infra output -raw container_registry_login_server)
-          az acr login --name "${ACR%%.*}"
-          docker build -f Dockerfile.ingress -t "$ACR/ingress:${GITHUB_SHA}" .
-          docker push "$ACR/ingress:${GITHUB_SHA}"
-
       - name: Terraform apply
         run: terraform -chdir=infra apply -auto-approve

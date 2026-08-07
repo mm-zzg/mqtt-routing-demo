@@ -14,14 +14,12 @@ locals {
   container_apps_uai_name = "${var.name_prefix}-aca-pull"
   env_name             = "${var.name_prefix}-aca"
   gateway_app_name     = "${var.name_prefix}-gateway"
-  ingress_app_name     = "${var.name_prefix}-ingress"
   tenant_apps          = { for tenant in var.tenant_names : tenant => "${var.name_prefix}-${tenant}" }
   tenant_hosts         = { for tenant in var.tenant_names : tenant => "${tenant}.${var.base_domain}" }
   wildcard_host        = "*.${var.base_domain}"
   zone_id              = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : data.cloudflare_zone.this.id
   images = {
     gateway      = "${azurerm_container_registry.this.login_server}/mqtt-gateway:${var.image_tag}"
-    ingress     = "${azurerm_container_registry.this.login_server}/ingress:${var.image_tag}"
     tenant_plane = "${azurerm_container_registry.this.login_server}/tenant-plane:${var.image_tag}"
   }
 }
@@ -256,95 +254,6 @@ resource "azurerm_container_app" "mqtt_gateway" {
 
       env {
         name  = "MqttGateway__RouteTable__1__Port"
-        value = "8080"
-      }
-    }
-  }
-}
-
-# Ingress: public-facing entry point for devices.
-# MQTT-over-TCP exposed on port 1883; HTTP proxy on port 8080 (internal health).
-resource "azurerm_container_app" "ingress" {
-  name                         = local.ingress_app_name
-  resource_group_name          = data.azurerm_resource_group.this.name
-  container_app_environment_id = azurerm_container_app_environment.this.id
-  revision_mode                = "Single"
-  depends_on                   = [azurerm_role_assignment.container_apps_pull]
-
-  identity {
-    type         = "UserAssigned"
-    identity_ids = [azurerm_user_assigned_identity.container_apps.id]
-  }
-
-  registry {
-    server   = azurerm_container_registry.this.login_server
-    identity = azurerm_user_assigned_identity.container_apps.id
-  }
-
-  template {
-    container {
-      name   = "ingress"
-      image  = local.images.ingress
-      cpu    = 0.25
-      memory = "0.5Gi"
-
-      env {
-        name  = "Ingress__BaseDomain"
-        value = var.base_domain
-      }
-
-      env {
-        name  = "Ingress__MqttTcpListenPort"
-        value = "1883"
-      }
-
-      env {
-        name  = "Ingress__MqttGatewayHost"
-        value = azurerm_container_app.mqtt_gateway.latest_revision_fqdn
-      }
-
-      env {
-        name  = "Ingress__MqttGatewayPort"
-        value = "1883"
-      }
-
-      env {
-        name  = "Ingress__RouteTable__0__Tenant"
-        value = var.tenant_names[0]
-      }
-
-      env {
-        name  = "Ingress__RouteTable__0__Host"
-        value = local.tenant_hosts[var.tenant_names[0]]
-      }
-
-      env {
-        name  = "Ingress__RouteTable__0__BackendHost"
-        value = azurerm_container_app.tenant[var.tenant_names[0]].latest_revision_fqdn
-      }
-
-      env {
-        name  = "Ingress__RouteTable__0__BackendPort"
-        value = "8080"
-      }
-
-      env {
-        name  = "Ingress__RouteTable__1__Tenant"
-        value = var.tenant_names[1]
-      }
-
-      env {
-        name  = "Ingress__RouteTable__1__Host"
-        value = local.tenant_hosts[var.tenant_names[1]]
-      }
-
-      env {
-        name  = "Ingress__RouteTable__1__BackendHost"
-        value = azurerm_container_app.tenant[var.tenant_names[1]].latest_revision_fqdn
-      }
-
-      env {
-        name  = "Ingress__RouteTable__1__BackendPort"
         value = "8080"
       }
     }
