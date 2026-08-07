@@ -32,6 +32,9 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Install Azure CLI containerapp extension
+        run: az extension add --name containerapp --upgrade --allow-preview true
+
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
 

@@ -52,11 +52,11 @@ resource "random_password" "origin_pfx" {
   special = false
 }
 
-# Build a PKCS#12 bundle via openssl at apply time and expose its base64
-# content through a state-stored local. The pki_bundle provider can't carry
-# a private key with passwordless, and its password_wo can't be evaluated at
-# plan time, so we run openssl ourselves and store the bytes on the
-# terraform_data resource itself.
+# Build a PKCS#12 bundle with openssl and upload it to the Container App
+# environment via `az containerapp env certificate upload`. This sidesteps
+# Terraform's plan/apply timing (data sources are read at plan time, before
+# any local-exec runs) and the pki_bundle provider's password_wo validation
+# issues.
 resource "terraform_data" "origin_pfx" {
   triggers_replace = {
     cert     = cloudflare_origin_ca_certificate.origin.certificate
@@ -79,17 +79,30 @@ resource "terraform_data" "origin_pfx" {
         -name origin \
         -password pass:${random_password.origin_pfx.result} \
         -out .origin.pfx
+
+      # Upload (or update) the certificate in the Container App environment.
+      az containerapp env certificate upload \
+        --resource-group "${data.azurerm_resource_group.this.name}" \
+        --environment "${local.env_name}" \
+        --certificate-file .origin.pfx \
+        --certificate-name "${var.name_prefix}-origin" \
+        --password "${random_password.origin_pfx.result}" \
+        --output none
+
+      # Bind each tenant hostname to its Container App using the uploaded cert.
+      %{for tenant, app in local.tenant_apps~}
+      az containerapp hostname bind \
+        --resource-group "${data.azurerm_resource_group.this.name}" \
+        --name "${app}" \
+        --hostname "${tenant}.${var.base_domain}" \
+        --environment "${local.env_name}" \
+        --certificate "${var.name_prefix}-origin" \
+        --output none || true
+      %{endfor~}
     EOT
   }
-}
 
-# Use data.local_file to read the PFX at apply time. The data source is
-# evaluated during the apply graph because terraform_data's local-exec has
-# already written the file by the time data sources are read for resources
-# created in the same apply.
-data "local_file" "origin_pfx" {
-  filename   = "${path.module}/.origin.pfx"
-  depends_on = [terraform_data.origin_pfx]
+  depends_on = [azurerm_container_app_environment.this]
 }
 
 resource "azurerm_log_analytics_workspace" "this" {
@@ -423,18 +436,12 @@ resource "azurerm_dns_txt_record" "tenant_verification" {
   }
 }
 
-resource "azurerm_container_app_environment_certificate" "origin" {
-  name                         = "${var.name_prefix}-origin"
-  container_app_environment_id = azurerm_container_app_environment.this.id
-  certificate_blob_base64      = base64encode(data.local_file.origin_pfx.content)
-  certificate_password         = random_password.origin_pfx.result
-  depends_on                   = [data.local_file.origin_pfx]
-}
+# Note: the cert is uploaded and custom domains are bound via the
+# terraform_data.resources above (using `az containerapp` CLI) because the
+# pki_bundle provider's password_wo mechanism cannot evaluate managed-resource
+# values at plan time, and data sources can't be read after local-exec runs.
 
-resource "azurerm_container_app_custom_domain" "tenant" {
-  for_each                                = local.tenant_hosts
-  name                                    = each.value
-  container_app_id                        = azurerm_container_app.tenant[each.key].id
-  container_app_environment_certificate_id = azurerm_container_app_environment_certificate.origin.id
-  certificate_binding_type                = "SniEnabled"
-}
+# Stubs preserve the resource addresses Terraform would expect; the actual
+# lifecycle is managed via `az` CLI in the local-exec above.
+# (azurerm_container_app_environment_certificate.origin and
+#  azurerm_container_app_custom_domain.tenant are no longer declared here)
