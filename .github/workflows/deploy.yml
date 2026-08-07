@@ -35,41 +35,38 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform init
-        run: terraform -chdir=infra init
-
-      - name: Import existing bootstrap resources
+      - name: Ensure Terraform state backend
         run: |
           RG="${TF_VAR_resource_group_name}"
-          SUB="${AZURE_SUBSCRIPTION_ID}"
-          PREFIX="${TF_VAR_name_prefix:-mqtt-routing}"
+          SUB=$(az account show --query id -o tsv)
+          SA="mqtttf${SUB:0:8}"
 
-          import_if_exists() {
-            local type=$1 name=$2 id=$3
-            if az resource show --ids "$id" --output none 2>/dev/null; then
-              echo "Importing $type.$name ..."
-              terraform -chdir=infra import "$type.$name" "$id" || true
-            else
-              echo "$type.$name does not exist, will be created."
-            fi
-          }
+          az group create --name "$RG" --location "${TF_VAR_location}" --output none 2>/dev/null || true
 
-          import_if_exists azurerm_log_analytics_workspace.this \
-            "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.OperationalInsights/workspaces/${PREFIX}-law"
-
-          import_if_exists azurerm_container_app_environment.this \
-            "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.App/managedEnvironments/${PREFIX}-aca"
-
-          # Discover ACR name from the resource group (only one expected)
-          ACR_NAME=$(az acr list -g "$RG" --query '[0].name' -o tsv 2>/dev/null || true)
-          if [ -n "$ACR_NAME" ] && [ "$ACR_NAME" != "None" ]; then
-            import_if_exists azurerm_container_registry.this \
-              "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ContainerRegistry/registries/$ACR_NAME"
-          else
-            echo "azurerm_container_registry.this does not exist, will be created."
+          if ! az storage account show --name "$SA" --resource-group "$RG" --output none 2>/dev/null; then
+            az storage account create \
+              --name "$SA" \
+              --resource-group "$RG" \
+              --location "${TF_VAR_location}" \
+              --sku Standard_LRS \
+              --min-tls-version TLS1_2 \
+              --allow-blob-public-access false \
+              --output none
           fi
-        env:
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          if ! az storage container exists --name tfstate --account-name "$SA" --auth-mode login --query exists -o tsv 2>/dev/null | grep -q true; then
+            az storage container create --name tfstate --account-name "$SA" --auth-mode login --output none 2>/dev/null \
+              || az storage container create --name tfstate --account-name "$SA" --output none
+          fi
+
+          echo "TF_STATE_RG=$RG" >> "$GITHUB_ENV"
+          echo "TF_STATE_SA=$SA" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=infra init \
+            -backend-config="resource_group_name=$TF_STATE_RG" \
+            -backend-config="storage_account_name=$TF_STATE_SA"
 
       - name: Terraform bootstrap
         run: terraform -chdir=infra apply -auto-approve -target=azurerm_log_analytics_workspace.this -target=azurerm_container_app_environment.this -target=azurerm_container_registry.this

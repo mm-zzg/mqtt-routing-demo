@@ -1,6 +1,11 @@
 terraform {
   required_version = ">= 1.11.0"
 
+  backend "azurerm" {
+    container_name = "tfstate"
+    key            = "mqtt-routing.tfstate"
+  }
+
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
