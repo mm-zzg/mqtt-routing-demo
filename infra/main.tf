@@ -234,7 +234,7 @@ resource "azurerm_container_app" "mqtt_gateway" {
 
       env {
         name  = "MqttGateway__RouteTable__0__Host"
-        value = azurerm_container_app.tenant[var.tenant_names[0]].latest_revision_fqdn
+        value = azurerm_container_app.tenant[var.tenant_names[0]].ingress[0].fqdn
       }
 
       env {
@@ -249,7 +249,7 @@ resource "azurerm_container_app" "mqtt_gateway" {
 
       env {
         name  = "MqttGateway__RouteTable__1__Host"
-        value = azurerm_container_app.tenant[var.tenant_names[1]].latest_revision_fqdn
+        value = azurerm_container_app.tenant[var.tenant_names[1]].ingress[0].fqdn
       }
 
       env {
@@ -282,7 +282,7 @@ resource "cloudflare_dns_record" "tenant" {
   zone_id = local.zone_id
   name    = each.key
   type    = "CNAME"
-  content = azurerm_container_app.tenant[each.key].latest_revision_fqdn
+  content = azurerm_container_app.tenant[each.key].ingress[0].fqdn
   ttl     = 1
   proxied = var.cloudflare_proxy
 }
@@ -330,7 +330,7 @@ resource "azurerm_dns_cname_record" "tenant" {
   zone_name           = azurerm_dns_zone.this.name
   resource_group_name = data.azurerm_resource_group.this.name
   ttl                 = 300
-  record              = azurerm_container_app.tenant[each.key].latest_revision_fqdn
+  record              = azurerm_container_app.tenant[each.key].ingress[0].fqdn
 }
 
 resource "azurerm_dns_txt_record" "tenant_verification" {

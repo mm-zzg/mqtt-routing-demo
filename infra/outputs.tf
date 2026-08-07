@@ -21,7 +21,7 @@ output "cloudflare_zone_name" {
 output "cloudflare_dns_records" {
   value = {
     for tenant, host in local.tenant_hosts : tenant => {
-      cname_target = azurerm_container_app.tenant[tenant].latest_revision_fqdn
+      cname_target = azurerm_container_app.tenant[tenant].ingress[0].fqdn
       host         = host
     }
   }
