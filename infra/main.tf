@@ -47,7 +47,7 @@ resource "cloudflare_origin_ca_certificate" "origin" {
   requested_validity = 5475
 }
 
-resource "random_password" "origin_pfx" {
+ephemeral "random_password" "origin_pfx" {
   length  = 32
   special = false
 }
