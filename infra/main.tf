@@ -47,14 +47,43 @@ resource "cloudflare_origin_ca_certificate" "origin" {
   requested_validity = 5475
 }
 
-# Azure Container App environment certificates accept unencrypted PKCS#12 bundles,
-# so we generate a passwordless PFX here to avoid issues with provider write-only
-# password support across versions.
-resource "pki_bundle" "origin_pfx" {
-  format          = "pkcs12"
-  pkcs12_encoding = "passwordless"
-  certificate_pem = cloudflare_origin_ca_certificate.origin.certificate
-  private_key_pem = tls_private_key.origin.private_key_pem
+resource "random_password" "origin_pfx" {
+  length  = 32
+  special = false
+}
+
+# Build a password-protected PKCS#12 bundle with openssl.
+# The pki_bundle provider's password_wo cannot accept a value sourced from a
+# managed resource at plan time, so we use openssl via local-exec instead.
+resource "terraform_data" "origin_pfx" {
+  triggers_replace = {
+    cert     = cloudflare_origin_ca_certificate.origin.certificate
+    key      = tls_private_key.origin.private_key_pem
+    password = random_password.origin_pfx.result
+  }
+
+  # openssl reads cert/key from stdin, writes PFX to ./origin.pfx
+  provisioner "local-exec" {
+    command = <<-EOT
+      cat > origin.crt <<'CERT'
+      ${cloudflare_origin_ca_certificate.origin.certificate}
+      CERT
+      cat > origin.key <<'KEY'
+      ${tls_private_key.origin.private_key_pem}
+      KEY
+      openssl pkcs12 -export \
+        -inkey origin.key \
+        -in origin.crt \
+        -name origin \
+        -password pass:${random_password.origin_pfx.result} \
+        -out origin.pfx
+    EOT
+  }
+}
+
+data "local_file" "origin_pfx" {
+  filename   = "${path.module}/origin.pfx"
+  depends_on = [terraform_data.origin_pfx]
 }
 
 resource "azurerm_log_analytics_workspace" "this" {
@@ -391,8 +420,8 @@ resource "azurerm_dns_txt_record" "tenant_verification" {
 resource "azurerm_container_app_environment_certificate" "origin" {
   name                         = "${var.name_prefix}-origin"
   container_app_environment_id = azurerm_container_app_environment.this.id
-  certificate_blob_base64      = pki_bundle.origin_pfx.content_base64
-  certificate_password         = ""
+  certificate_blob_base64      = base64encode(data.local_file.origin_pfx.content)
+  certificate_password         = random_password.origin_pfx.result
 }
 
 resource "azurerm_container_app_custom_domain" "tenant" {
