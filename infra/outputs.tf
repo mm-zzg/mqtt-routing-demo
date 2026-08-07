@@ -26,3 +26,13 @@ output "cloudflare_dns_records" {
     }
   }
 }
+
+output "container_app_environment_name" {
+  description = "Azure Container Apps environment name that holds uploaded certificates."
+  value       = azurerm_container_app_environment.this.name
+}
+
+output "origin_certificate_name" {
+  description = "Expected certificate name uploaded to the Container Apps environment."
+  value       = "${var.name_prefix}-origin"
+}

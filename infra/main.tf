@@ -58,11 +58,48 @@ resource "random_password" "origin_pfx" {
 # Terraform's plan/apply timing (data sources are read at plan time, before
 # any local-exec runs) and the pki_bundle provider's password_wo validation
 # issues.
-resource "terraform_data" "origin_pfx" {
+resource "terraform_data" "origin_pfx_upload" {
   triggers_replace = {
     cert     = cloudflare_origin_ca_certificate.origin.certificate
     key      = tls_private_key.origin.private_key_pem
     password = random_password.origin_pfx.result
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -euo pipefail
+
+      cat > .origin.crt <<'CERT'
+      ${cloudflare_origin_ca_certificate.origin.certificate}
+      CERT
+      cat > .origin.key <<'KEY'
+      ${tls_private_key.origin.private_key_pem}
+      KEY
+      openssl pkcs12 -export \
+        -inkey .origin.key \
+        -in .origin.crt \
+        -name origin \
+        -password pass:${random_password.origin_pfx.result} \
+        -out .origin.pfx
+
+      # Upload (or update) the certificate in the Container App environment.
+      az containerapp env certificate upload \
+        --resource-group "${data.azurerm_resource_group.this.name}" \
+        --environment "${local.env_name}" \
+        --certificate-file .origin.pfx \
+        --certificate-name "${var.name_prefix}-origin" \
+        --password "${random_password.origin_pfx.result}" \
+        --output none
+    EOT
+  }
+
+  depends_on = [azurerm_container_app_environment.this]
+}
+
+resource "terraform_data" "origin_host_bindings" {
+  triggers_replace = {
+    cert  = cloudflare_origin_ca_certificate.origin.certificate
+    hosts = jsonencode(local.tenant_hosts)
   }
 
   provisioner "local-exec" {
@@ -97,28 +134,6 @@ resource "terraform_data" "origin_pfx" {
         return 1
       }
 
-      cat > .origin.crt <<'CERT'
-      ${cloudflare_origin_ca_certificate.origin.certificate}
-      CERT
-      cat > .origin.key <<'KEY'
-      ${tls_private_key.origin.private_key_pem}
-      KEY
-      openssl pkcs12 -export \
-        -inkey .origin.key \
-        -in .origin.crt \
-        -name origin \
-        -password pass:${random_password.origin_pfx.result} \
-        -out .origin.pfx
-
-      # Upload (or update) the certificate in the Container App environment.
-      az containerapp env certificate upload \
-        --resource-group "${data.azurerm_resource_group.this.name}" \
-        --environment "${local.env_name}" \
-        --certificate-file .origin.pfx \
-        --certificate-name "${var.name_prefix}-origin" \
-        --password "${random_password.origin_pfx.result}" \
-        --output none
-
       # Bind each tenant hostname to its Container App using the uploaded cert.
       %{for tenant, app in local.tenant_apps~}
       bind_hostname "${app}" "${tenant}.${var.base_domain}"
@@ -127,7 +142,7 @@ resource "terraform_data" "origin_pfx" {
   }
 
   depends_on = [
-    azurerm_container_app_environment.this,
+    terraform_data.origin_pfx_upload,
     azurerm_container_app.tenant,
     cloudflare_dns_record.tenant,
     cloudflare_dns_record.tenant_verification,
@@ -404,7 +419,8 @@ resource "azurerm_dns_txt_record" "tenant_verification" {
 }
 
 # Note: the cert is uploaded and custom domains are bound via the
-# terraform_data.resources above (using `az containerapp` CLI) because the
+# terraform_data.origin_pfx_upload and terraform_data.origin_host_bindings
+# resources above (using `az containerapp` CLI) because the
 # pki_bundle provider's password_wo mechanism cannot evaluate managed-resource
 # values at plan time, and data sources can't be read after local-exec runs.
 
