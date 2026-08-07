@@ -14,6 +14,7 @@ jobs:
       contents: read
 
     env:
+      TF_VAR_resource_group_name: ${{ vars.RESOURCE_GROUP_NAME }}
       TF_VAR_base_domain: ${{ vars.BASE_DOMAIN }}
       TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID || '' }}
       TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID || '' }}
@@ -34,20 +35,11 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Ensure Terraform state backend
-        working-directory: infra
-        run: |
-          chmod +x ./bootstrap-tfstate.sh
-          ./bootstrap-tfstate.sh
-
       - name: Terraform init
-        run: |
-          terraform -chdir=infra init \
-            -backend-config="resource_group_name=$TF_STATE_RG" \
-            -backend-config="storage_account_name=$TF_STATE_SA"
+        run: terraform -chdir=infra init
 
       - name: Terraform bootstrap
-        run: terraform -chdir=infra apply -auto-approve -target=azurerm_resource_group.this -target=azurerm_log_analytics_workspace.this -target=azurerm_container_app_environment.this -target=azurerm_container_registry.this
+        run: terraform -chdir=infra apply -auto-approve -target=azurerm_log_analytics_workspace.this -target=azurerm_container_app_environment.this -target=azurerm_container_registry.this
 
       - name: Build and push tenant plane image
         run: |

@@ -4,8 +4,11 @@ data "cloudflare_zone" "this" {
   }
 }
 
+data "azurerm_resource_group" "this" {
+  name = var.resource_group_name
+}
+
 locals {
-  resource_group_name = "${var.name_prefix}-rg"
   log_analytics_name   = "${var.name_prefix}-law"
   acr_name             = replace("${var.name_prefix}${substr(replace(replace(var.base_domain, ".", ""), "-", ""), 0, 12)}", "-", "")
   env_name             = "${var.name_prefix}-aca"
@@ -57,11 +60,6 @@ resource "pki_bundle" "origin_pfx" {
   pkcs12_encoding = "passwordless"
   certificate_pem = cloudflare_origin_ca_certificate.origin.certificate
   private_key_pem = tls_private_key.origin.private_key_pem
-}
-
-resource "azurerm_resource_group" "this" {
-  name     = local.resource_group_name
-  location = var.location
 }
 
 resource "azurerm_log_analytics_workspace" "this" {

@@ -1,3 +1,8 @@
+variable "resource_group_name" {
+  type        = string
+  description = "Existing Azure resource group name. Must be pre-created manually."
+}
+
 variable "name_prefix" {
   type        = string
   description = "Prefix for Azure resource names."

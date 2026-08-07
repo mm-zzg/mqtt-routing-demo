@@ -1,14 +1,6 @@
 terraform {
   required_version = ">= 1.11.0"
 
-  # Remote state in Azure Storage. Remaining settings are supplied via
-  # -backend-config flags (see .github/workflows/deploy.yml and
-  # infra/bootstrap-tfstate.sh).
-  backend "azurerm" {
-    container_name = "tfstate"
-    key            = "mqtt-routing.tfstate"
-  }
-
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
