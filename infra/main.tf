@@ -47,17 +47,19 @@ resource "cloudflare_origin_ca_certificate" "origin" {
   requested_validity = 5475
 }
 
-ephemeral "random_password" "origin_pfx" {
+resource "random_password" "origin_pfx" {
   length  = 32
   special = false
 }
 
 # Azure Container App environment certificates need a PKCS#12 bundle.
 # We use password encoding so the private key is included (required for TLS).
+# password_wo_value (instead of password_wo) accepts a value resolved at apply time
+# from a managed resource, sidestepping the plan-time validation issue with ephemeral sources.
 resource "pki_bundle" "origin_pfx" {
   format              = "pkcs12"
   pkcs12_encoding     = "modern"
-  password_wo         = ephemeral.random_password.origin_pfx.result
+  password_wo         = random_password.origin_pfx.result
   password_wo_version = 1
   certificate_pem     = cloudflare_origin_ca_certificate.origin.certificate
   private_key_pem     = tls_private_key.origin.private_key_pem
@@ -398,7 +400,7 @@ resource "azurerm_container_app_environment_certificate" "origin" {
   name                         = "${var.name_prefix}-origin"
   container_app_environment_id = azurerm_container_app_environment.this.id
   certificate_blob_base64      = pki_bundle.origin_pfx.content_base64
-  certificate_password         = ephemeral.random_password.origin_pfx.result
+  certificate_password         = random_password.origin_pfx.result
 }
 
 resource "azurerm_container_app_custom_domain" "tenant" {
