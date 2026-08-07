@@ -2,8 +2,10 @@ terraform {
   required_version = ">= 1.11.0"
 
   backend "azurerm" {
-    container_name = "tfstate"
-    key            = "mqtt-routing.tfstate"
+    resource_group_name  = "tfstate-rg"
+    storage_account_name = "mqtttfroutingdemo"
+    container_name       = "tfstate"
+    key                  = "mqtt-routing.terraform.tfstate"
   }
 
   required_providers {

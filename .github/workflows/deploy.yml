@@ -35,46 +35,8 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Ensure Terraform state backend
-        run: |
-          RG="${TF_VAR_resource_group_name}"
-          SUB=$(az account show --query id -o tsv)
-          SA="mqtttf${SUB:0:8}"
-
-          az group create --name "$RG" --location "${TF_VAR_location}" --output none 2>/dev/null || true
-
-          # Check if SA exists anywhere in the subscription first
-          EXISTING_RG=$(az storage account list --query "[?name=='$SA'].resourceGroup" -o tsv 2>/dev/null || true)
-
-          if [ -n "$EXISTING_RG" ]; then
-            echo "Storage account '$SA' already exists in resource group '$EXISTING_RG'. Reusing it."
-            SA_RG="$EXISTING_RG"
-          else
-            echo "Creating storage account '$SA' in resource group '$RG' ..."
-            az storage account create \
-              --name "$SA" \
-              --resource-group "$RG" \
-              --location "${TF_VAR_location}" \
-              --sku Standard_LRS \
-              --min-tls-version TLS1_2 \
-              --allow-blob-public-access false \
-              --output none
-            SA_RG="$RG"
-          fi
-
-          if ! az storage container exists --name tfstate --account-name "$SA" --auth-mode login --query exists -o tsv 2>/dev/null | grep -q true; then
-            az storage container create --name tfstate --account-name "$SA" --auth-mode login --output none 2>/dev/null \
-              || az storage container create --name tfstate --account-name "$SA" --output none
-          fi
-
-          echo "TF_STATE_RG=$SA_RG" >> "$GITHUB_ENV"
-          echo "TF_STATE_SA=$SA" >> "$GITHUB_ENV"
-
       - name: Terraform init
-        run: |
-          terraform -chdir=infra init \
-            -backend-config="resource_group_name=$TF_STATE_RG" \
-            -backend-config="storage_account_name=$TF_STATE_SA"
+        run: terraform -chdir=infra init
 
       - name: Terraform bootstrap
         run: terraform -chdir=infra apply -auto-approve -target=azurerm_log_analytics_workspace.this -target=azurerm_container_app_environment.this -target=azurerm_container_registry.this
