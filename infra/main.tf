@@ -88,7 +88,7 @@ resource "terraform_data" "origin_pfx" {
           fi
 
           if [ "$i" -lt "$attempts" ]; then
-            echo "Bind failed for $host_name (attempt $i/$attempts). Retrying in ${wait_seconds}s..."
+            echo "Bind failed for $host_name (attempt $i/$attempts). Retrying in $wait_seconds s..."
             sleep "$wait_seconds"
           fi
         done
