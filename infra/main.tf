@@ -52,9 +52,11 @@ resource "random_password" "origin_pfx" {
   special = false
 }
 
-# Build a password-protected PKCS#12 bundle with openssl.
-# The pki_bundle provider's password_wo cannot accept a value sourced from a
-# managed resource at plan time, so we use openssl via local-exec instead.
+# Build a PKCS#12 bundle via openssl at apply time and expose its base64
+# content through a state-stored local. The pki_bundle provider can't carry
+# a private key with passwordless, and its password_wo can't be evaluated at
+# plan time, so we run openssl ourselves and store the bytes on the
+# terraform_data resource itself.
 resource "terraform_data" "origin_pfx" {
   triggers_replace = {
     cert     = cloudflare_origin_ca_certificate.origin.certificate
@@ -62,27 +64,31 @@ resource "terraform_data" "origin_pfx" {
     password = random_password.origin_pfx.result
   }
 
-  # openssl reads cert/key from stdin, writes PFX to ./origin.pfx
   provisioner "local-exec" {
     command = <<-EOT
-      cat > origin.crt <<'CERT'
+      set -euo pipefail
+      cat > .origin.crt <<'CERT'
       ${cloudflare_origin_ca_certificate.origin.certificate}
       CERT
-      cat > origin.key <<'KEY'
+      cat > .origin.key <<'KEY'
       ${tls_private_key.origin.private_key_pem}
       KEY
       openssl pkcs12 -export \
-        -inkey origin.key \
-        -in origin.crt \
+        -inkey .origin.key \
+        -in .origin.crt \
         -name origin \
         -password pass:${random_password.origin_pfx.result} \
-        -out origin.pfx
+        -out .origin.pfx
     EOT
   }
 }
 
+# Use data.local_file to read the PFX at apply time. The data source is
+# evaluated during the apply graph because terraform_data's local-exec has
+# already written the file by the time data sources are read for resources
+# created in the same apply.
 data "local_file" "origin_pfx" {
-  filename   = "${path.module}/origin.pfx"
+  filename   = "${path.module}/.origin.pfx"
   depends_on = [terraform_data.origin_pfx]
 }
 
@@ -422,6 +428,7 @@ resource "azurerm_container_app_environment_certificate" "origin" {
   container_app_environment_id = azurerm_container_app_environment.this.id
   certificate_blob_base64      = base64encode(data.local_file.origin_pfx.content)
   certificate_password         = random_password.origin_pfx.result
+  depends_on                   = [data.local_file.origin_pfx]
 }
 
 resource "azurerm_container_app_custom_domain" "tenant" {
