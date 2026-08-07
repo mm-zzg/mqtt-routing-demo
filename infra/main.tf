@@ -68,6 +68,35 @@ resource "terraform_data" "origin_pfx" {
   provisioner "local-exec" {
     command = <<-EOT
       set -euo pipefail
+
+      bind_hostname() {
+        local app_name="$1"
+        local host_name="$2"
+        local attempts=12
+        local wait_seconds=10
+
+        for i in $(seq 1 "$attempts"); do
+          if az containerapp hostname bind \
+            --resource-group "${data.azurerm_resource_group.this.name}" \
+            --name "$app_name" \
+            --hostname "$host_name" \
+            --environment "${local.env_name}" \
+            --certificate "${var.name_prefix}-origin" \
+            --output none; then
+            echo "Bound $host_name to $app_name"
+            return 0
+          fi
+
+          if [ "$i" -lt "$attempts" ]; then
+            echo "Bind failed for $host_name (attempt $i/$attempts). Retrying in ${wait_seconds}s..."
+            sleep "$wait_seconds"
+          fi
+        done
+
+        echo "Failed to bind $host_name to $app_name after $attempts attempts"
+        return 1
+      }
+
       cat > .origin.crt <<'CERT'
       ${cloudflare_origin_ca_certificate.origin.certificate}
       CERT
@@ -92,18 +121,19 @@ resource "terraform_data" "origin_pfx" {
 
       # Bind each tenant hostname to its Container App using the uploaded cert.
       %{for tenant, app in local.tenant_apps~}
-      az containerapp hostname bind \
-        --resource-group "${data.azurerm_resource_group.this.name}" \
-        --name "${app}" \
-        --hostname "${tenant}.${var.base_domain}" \
-        --environment "${local.env_name}" \
-        --certificate "${var.name_prefix}-origin" \
-        --output none || true
+      bind_hostname "${app}" "${tenant}.${var.base_domain}"
       %{endfor~}
     EOT
   }
 
-  depends_on = [azurerm_container_app_environment.this]
+  depends_on = [
+    azurerm_container_app_environment.this,
+    azurerm_container_app.tenant,
+    cloudflare_dns_record.tenant,
+    cloudflare_dns_record.tenant_verification,
+    azurerm_dns_cname_record.tenant,
+    azurerm_dns_txt_record.tenant_verification
+  ]
 }
 
 resource "azurerm_log_analytics_workspace" "this" {
