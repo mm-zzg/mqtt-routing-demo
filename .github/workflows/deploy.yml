@@ -43,7 +43,14 @@ jobs:
 
           az group create --name "$RG" --location "${TF_VAR_location}" --output none 2>/dev/null || true
 
-          if ! az storage account show --name "$SA" --resource-group "$RG" --output none 2>/dev/null; then
+          # Check if SA exists anywhere in the subscription first
+          EXISTING_RG=$(az storage account list --query "[?name=='$SA'].resourceGroup" -o tsv 2>/dev/null || true)
+
+          if [ -n "$EXISTING_RG" ]; then
+            echo "Storage account '$SA' already exists in resource group '$EXISTING_RG'. Reusing it."
+            SA_RG="$EXISTING_RG"
+          else
+            echo "Creating storage account '$SA' in resource group '$RG' ..."
             az storage account create \
               --name "$SA" \
               --resource-group "$RG" \
@@ -52,6 +59,7 @@ jobs:
               --min-tls-version TLS1_2 \
               --allow-blob-public-access false \
               --output none
+            SA_RG="$RG"
           fi
 
           if ! az storage container exists --name tfstate --account-name "$SA" --auth-mode login --query exists -o tsv 2>/dev/null | grep -q true; then
@@ -59,7 +67,7 @@ jobs:
               || az storage container create --name tfstate --account-name "$SA" --output none
           fi
 
-          echo "TF_STATE_RG=$RG" >> "$GITHUB_ENV"
+          echo "TF_STATE_RG=$SA_RG" >> "$GITHUB_ENV"
           echo "TF_STATE_SA=$SA" >> "$GITHUB_ENV"
 
       - name: Terraform init
