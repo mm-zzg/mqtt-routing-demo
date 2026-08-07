@@ -52,12 +52,12 @@ resource "random_password" "origin_pfx" {
   special = false
 }
 
-# Azure Container App environment certificates accept unencrypted PKCS#12 bundles,
-# so we generate a passwordless PFX here to avoid issues with provider write-only
-# password support across versions.
+# Azure Container App environment certificates need a PKCS#12 bundle.
+# We use password encoding so the private key is included (required for TLS).
 resource "pki_bundle" "origin_pfx" {
   format          = "pkcs12"
-  pkcs12_encoding = "passwordless"
+  pkcs12_encoding = "password"
+  password        = random_password.origin_pfx.result
   certificate_pem = cloudflare_origin_ca_certificate.origin.certificate
   private_key_pem = tls_private_key.origin.private_key_pem
 }
@@ -397,7 +397,7 @@ resource "azurerm_container_app_environment_certificate" "origin" {
   name                         = "${var.name_prefix}-origin"
   container_app_environment_id = azurerm_container_app_environment.this.id
   certificate_blob_base64      = pki_bundle.origin_pfx.content_base64
-  certificate_password         = ""
+  certificate_password         = random_password.origin_pfx.result
 }
 
 resource "azurerm_container_app_custom_domain" "tenant" {
