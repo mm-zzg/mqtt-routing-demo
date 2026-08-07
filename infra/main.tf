@@ -57,7 +57,7 @@ ephemeral "random_password" "origin_pfx" {
 resource "pki_bundle" "origin_pfx" {
   format              = "pkcs12"
   pkcs12_encoding     = "modern"
-  password_wo         = random_password.origin_pfx.result
+  password_wo         = ephemeral.random_password.origin_pfx.result
   password_wo_version = 1
   certificate_pem     = cloudflare_origin_ca_certificate.origin.certificate
   private_key_pem     = tls_private_key.origin.private_key_pem
@@ -398,7 +398,7 @@ resource "azurerm_container_app_environment_certificate" "origin" {
   name                         = "${var.name_prefix}-origin"
   container_app_environment_id = azurerm_container_app_environment.this.id
   certificate_blob_base64      = pki_bundle.origin_pfx.content_base64
-  certificate_password         = random_password.origin_pfx.result
+  certificate_password         = ephemeral.random_password.origin_pfx.result
 }
 
 resource "azurerm_container_app_custom_domain" "tenant" {
