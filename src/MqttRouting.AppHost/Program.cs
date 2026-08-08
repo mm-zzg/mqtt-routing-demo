@@ -3,6 +3,7 @@ using Aspire.Hosting;
 var builder = DistributedApplication.CreateBuilder(args);
 var baseDomain = builder.Configuration["BaseDomain"] ?? "example.com";
 
+// TenantPlane A: internal broker on 11883 (localhost), external TCP listeners on 1883
 builder.AddProject("tenantA", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj")
     .WithHttpEndpoint(port: 18080, targetPort: 18080)
     .WithEndpoint(port: 1883, targetPort: 1883, scheme: "tcp", name: "mqtt")
@@ -10,8 +11,10 @@ builder.AddProject("tenantA", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPla
     .WithEnvironment("TenantPlane__BaseDomain", baseDomain)
     .WithEnvironment("TenantPlane__CustomDomain", $"tenantA.{baseDomain}")
     .WithEnvironment("TenantPlane__HttpPort", "18080")
-    .WithEnvironment("TenantPlane__BrokerPort", "1883");
+    .WithEnvironment("TenantPlane__InternalBrokerPort", "11883")
+    .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1883");
 
+// TenantPlane B: internal broker on 11884 (localhost), external TCP listener on 1884
 builder.AddProject("tenantB", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj")
     .WithHttpEndpoint(port: 18081, targetPort: 18081)
     .WithEndpoint(port: 1884, targetPort: 1884, scheme: "tcp", name: "mqtt")
@@ -19,10 +22,11 @@ builder.AddProject("tenantB", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPla
     .WithEnvironment("TenantPlane__BaseDomain", baseDomain)
     .WithEnvironment("TenantPlane__CustomDomain", $"tenantB.{baseDomain}")
     .WithEnvironment("TenantPlane__HttpPort", "18081")
-    .WithEnvironment("TenantPlane__BrokerPort", "1884");
+    .WithEnvironment("TenantPlane__InternalBrokerPort", "11884")
+    .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1884");
 
 // MqttGateway: receives MQTT-over-TCP from Ingress, parses CONNECT,
-// extracts tenant from client ID, bridges TCP → WebSocket to TenantPlane.
+// extracts tenant from client ID, bridges TCP → TCP to TenantPlane.
 builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj")
     .WithHttpEndpoint(port: 18200, targetPort: 18200)
     .WithEndpoint(port: 1885, targetPort: 1885, scheme: "tcp", name: "mqtt-tcp")
@@ -30,10 +34,10 @@ builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.Mqtt
     .WithEnvironment("MqttGateway__MqttTcpListenPort", "1885")
     .WithEnvironment("MqttGateway__RouteTable__0__Tenant", "tenantA")
     .WithEnvironment("MqttGateway__RouteTable__0__Host", "localhost")
-    .WithEnvironment("MqttGateway__RouteTable__0__Port", "18080")
+    .WithEnvironment("MqttGateway__RouteTable__0__Port", "1883")
     .WithEnvironment("MqttGateway__RouteTable__1__Tenant", "tenantB")
     .WithEnvironment("MqttGateway__RouteTable__1__Host", "localhost")
-    .WithEnvironment("MqttGateway__RouteTable__1__Port", "18081");
+    .WithEnvironment("MqttGateway__RouteTable__1__Port", "1884");
 
 // Ingress: public-facing entry point. HTTP for web traffic, TCP for MQTT.
 // Devices connect with MQTT-over-TCP; Ingress proxies raw TCP to MqttGateway.

@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Options;
-using MQTTnet.Server;
 using MqttRouting.ServiceDefaults;
 using MqttRouting.TenantPlane;
 
@@ -11,7 +10,15 @@ builder.Services.AddOptions<TenantPlaneOptions>()
     {
         options.TenantName = string.IsNullOrWhiteSpace(options.TenantName) ? "tenant" : options.TenantName;
         options.HttpPort = options.HttpPort <= 0 ? 8080 : options.HttpPort;
-        options.BrokerPort = options.BrokerPort <= 0 ? 1883 : options.BrokerPort;
+        options.InternalBrokerPort = options.InternalBrokerPort <= 0 ? 11883 : options.InternalBrokerPort;
+        options.TcpListenerPorts = options.TcpListenerPorts
+            .Where(p => p > 0 && p != options.InternalBrokerPort)
+            .Distinct()
+            .ToList();
+        if (options.TcpListenerPorts.Count == 0)
+        {
+            options.TcpListenerPorts = [1883, 1884];
+        }
     });
 builder.Services.AddSingleton<TenantMessageStore>();
 builder.Services.AddSingleton<MqttBrokerService>();
@@ -19,21 +26,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MqttBrokerService>
 
 var app = builder.Build();
 
-app.UseWebSockets();
 app.MapDefaultEndpoints();
-
-// WebSocket MQTT endpoint — accepts raw MQTT-over-WebSocket connections and bridges to the local broker
-app.Map("/mqtt", async (HttpContext ctx, MqttBrokerService broker) =>
-{
-    if (!ctx.WebSockets.IsWebSocketRequest)
-    {
-        ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
-        return;
-    }
-
-    using var ws = await ctx.WebSockets.AcceptWebSocketAsync("mqtt");
-    await broker.BridgeWebSocketAsync(ws, ctx.RequestAborted);
-});
 
 app.MapGet("/", (IOptions<TenantPlaneOptions> options) =>
 {
@@ -43,7 +36,9 @@ app.MapGet("/", (IOptions<TenantPlaneOptions> options) =>
         tenant.TenantName,
         tenant.BaseDomain,
         tenant.HttpPort,
-        tenant.BrokerPort,
+        InternalBrokerPort = tenant.InternalBrokerPort,
+        TcpListenerPorts = tenant.TcpListenerPorts,
+        IpcEndpoint = tenant.IpcEndpointPath ?? "(disabled)",
         CustomDomain = tenant.CustomDomain ?? $"{tenant.TenantName}.{tenant.BaseDomain}"
     });
 });
@@ -58,7 +53,9 @@ app.MapPost("/messages", (TenantMessage message, TenantMessageStore store) =>
 app.MapGet("/broker", (IOptions<TenantPlaneOptions> options) => Results.Ok(new
 {
     name = options.Value.TenantName,
-    port = options.Value.BrokerPort,
+    internalBrokerPort = options.Value.InternalBrokerPort,
+    tcpListenerPorts = options.Value.TcpListenerPorts,
+    ipcEndpoint = options.Value.IpcEndpointPath ?? "(disabled)",
     mode = "embedded"
 }));
 

@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Options;
 using MqttRouting.ServiceDefaults;
@@ -16,7 +15,7 @@ builder.Services.AddOptions<MqttGatewayOptions>()
     });
 
 // TCP listener: accepts MQTT-over-TCP from Ingress, parses CONNECT,
-// extracts tenant from client ID, bridges to TenantPlane via WebSocket.
+// extracts tenant from client ID, bridges to TenantPlane via TCP.
 builder.Services.AddHostedService<MqttTcpGatewayService>();
 
 var app = builder.Build();
@@ -31,7 +30,7 @@ app.MapGet("/", (IOptions<MqttGatewayOptions> options) =>
 
 await app.RunAsync();
 
-// ── TCP → WebSocket MQTT gateway ──────────────────────────────────────
+// ── TCP → TCP MQTT gateway ────────────────────────────────────────────
 
 sealed class MqttTcpGatewayService : IHostedService
 {
@@ -51,7 +50,7 @@ sealed class MqttTcpGatewayService : IHostedService
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _listener = new TcpListener(IPAddress.Any, _options.MqttTcpListenPort);
         _listener.Start();
-        _logger.LogInformation("MQTT TCP gateway listening on :{Port} (TCP → WS bridge)", _options.MqttTcpListenPort);
+        _logger.LogInformation("MQTT TCP gateway listening on :{Port} (TCP → TCP bridge)", _options.MqttTcpListenPort);
 
         _ = AcceptLoopAsync(_cts.Token);
         return Task.CompletedTask;
@@ -212,13 +211,11 @@ sealed class MqttTcpGatewayService : IHostedService
             _logger.LogInformation("Routing {ClientId} → tenant {Tenant} → {Host}:{Port}",
                 clientId, tenant, backend.Host, backend.Port);
 
-            // ── Connect to TenantPlane via WebSocket ──
-            using var downstream = new ClientWebSocket();
-            var downstreamUri = new Uri($"ws://{backend.Host}:{backend.Port}/mqtt");
-
+            // ── Connect to TenantPlane via TCP ──
+            using var downstream = new TcpClient();
             try
             {
-                await downstream.ConnectAsync(downstreamUri, ct);
+                await downstream.ConnectAsync(backend.Host, backend.Port, ct);
             }
             catch (Exception ex)
             {
@@ -230,31 +227,29 @@ sealed class MqttTcpGatewayService : IHostedService
                 return;
             }
 
-            // ── Forward buffered CONNECT bytes to TenantPlane WS ──
-            if (downstream.State == WebSocketState.Open && totalConnectSize > 0)
+            // ── Forward buffered CONNECT bytes to TenantPlane ──
+            await using var downstreamStream = downstream.GetStream();
+
+            if (totalConnectSize > 0)
             {
-                await downstream.SendAsync(
-                    new ArraySegment<byte>(connectBuffer, 0, totalConnectSize),
-                    WebSocketMessageType.Binary, true, ct);
+                await downstreamStream.WriteAsync(connectBuffer.AsMemory(0, totalConnectSize), ct);
             }
 
             // Forward any extra bytes beyond CONNECT
-            if (downstream.State == WebSocketState.Open && bytesRead > totalConnectSize)
+            if (bytesRead > totalConnectSize)
             {
-                await downstream.SendAsync(
-                    new ArraySegment<byte>(connectBuffer, totalConnectSize, bytesRead - totalConnectSize),
-                    WebSocketMessageType.Binary, true, ct);
+                await downstreamStream.WriteAsync(connectBuffer.AsMemory(totalConnectSize, bytesRead - totalConnectSize), ct);
             }
 
-            // ── Bidirectional pump: TCP ↔ WebSocket ──
+            // ── Bidirectional pump: TCP ↔ TCP ──
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var tcpToWs = PumpTcpToWsAsync(stream, downstream, linkedCts.Token);
-            var wsToTcp = PumpWsToTcpAsync(downstream, stream, linkedCts.Token);
+            var upstreamToDownstream = BridgeStreamAsync(stream, downstreamStream, linkedCts.Token);
+            var downstreamToUpstream = BridgeStreamAsync(downstreamStream, stream, linkedCts.Token);
 
-            await Task.WhenAny(tcpToWs, wsToTcp);
+            await Task.WhenAny(upstreamToDownstream, downstreamToUpstream);
             linkedCts.Cancel();
 
-            try { await Task.WhenAll(tcpToWs, wsToTcp); } catch { /* shutdown */ }
+            try { await Task.WhenAll(upstreamToDownstream, downstreamToUpstream); } catch { /* shutdown */ }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -274,41 +269,23 @@ sealed class MqttTcpGatewayService : IHostedService
         return string.IsNullOrWhiteSpace(tenant) ? null : tenant;
     }
 
-    private static async Task PumpTcpToWsAsync(NetworkStream tcp, WebSocket ws, CancellationToken ct)
+    /// <summary>
+    /// Copies data from <paramref name="source"/> to <paramref name="destination"/> until
+    /// EOF or cancellation.
+    /// </summary>
+    private static async Task BridgeStreamAsync(Stream source, Stream destination, CancellationToken ct)
     {
         var buffer = new byte[8192];
         try
         {
-            while (!ct.IsCancellationRequested)
+            int read;
+            while (!ct.IsCancellationRequested && (read = await source.ReadAsync(buffer, ct)) > 0)
             {
-                var n = await tcp.ReadAsync(buffer, ct);
-                if (n == 0) return;
-                if (ws.State == WebSocketState.Open)
-                    await ws.SendAsync(new ArraySegment<byte>(buffer, 0, n), WebSocketMessageType.Binary, true, ct);
+                await destination.WriteAsync(buffer.AsMemory(0, read), ct);
             }
         }
         catch (OperationCanceledException) { }
         catch (IOException) { }
-        catch (WebSocketException) { }
-    }
-
-    private static async Task PumpWsToTcpAsync(WebSocket ws, NetworkStream tcp, CancellationToken ct)
-    {
-        var buffer = new byte[8192];
-        try
-        {
-            while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
-            {
-                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-                if (result.MessageType == WebSocketMessageType.Close)
-                    return;
-                await tcp.WriteAsync(buffer.AsMemory(0, result.Count), ct);
-                await tcp.FlushAsync(ct);
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (IOException) { }
-        catch (WebSocketException) { }
     }
 }
 
@@ -323,5 +300,5 @@ sealed record TenantBackend
 {
     public string Tenant { get; set; } = string.Empty;
     public string Host { get; set; } = string.Empty;
-    public int Port { get; set; } = 8080;
+    public int Port { get; set; } = 1883;
 }

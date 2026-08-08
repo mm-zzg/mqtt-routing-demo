@@ -1,13 +1,20 @@
-using System.Net.WebSockets;
+using System.IO.Pipes;
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Options;
 using MQTTnet;
 using MQTTnet.Server;
 
 namespace MqttRouting.TenantPlane;
 
-internal sealed class MqttBrokerService : IHostedService
+internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
 {
     private MqttServer? _server;
+    private readonly List<TcpListener> _tcpListeners = [];
+    private readonly List<Task> _listenerTasks = [];
+    private CancellationTokenSource? _listenerCts;
+    private Task? _ipcListenerTask;
+
     private readonly TenantMessageStore _store;
     private readonly IOptions<TenantPlaneOptions> _options;
     private readonly ILogger<MqttBrokerService> _logger;
@@ -24,9 +31,15 @@ internal sealed class MqttBrokerService : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        _listenerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        var internalPort = _options.Value.InternalBrokerPort;
+
+        // ── Internal MQTTnet broker (localhost-only, not publicly exposed) ─
         var serverOptions = new MqttServerOptionsBuilder()
             .WithDefaultEndpoint()
-            .WithDefaultEndpointPort(_options.Value.BrokerPort)
+            .WithDefaultEndpointBoundIPAddress(IPAddress.Loopback)
+            .WithDefaultEndpointPort(internalPort)
             .Build();
 
         _server = new MqttServerFactory().CreateMqttServer(serverOptions);
@@ -35,80 +48,252 @@ internal sealed class MqttBrokerService : IHostedService
 
         await _server.StartAsync();
 
-        _logger.LogInformation("MQTT broker started on TCP port {Port} and WebSocket /mqtt (tenant: {Tenant})",
-            _options.Value.BrokerPort, _options.Value.TenantName);
+        // ── External TCP listeners → forward to internal broker ──────────
+        foreach (var port in _options.Value.TcpListenerPorts)
+        {
+            if (port == internalPort)
+            {
+                _logger.LogWarning("Skipping TCP listener port {Port} (same as internal broker port)", port);
+                continue;
+            }
+
+            var listener = new TcpListener(IPAddress.Any, port);
+            listener.Start();
+            _tcpListeners.Add(listener);
+
+            var task = RunTcpListenerAsync(listener, port, _listenerCts.Token);
+            _listenerTasks.Add(task);
+
+            _logger.LogInformation("External TCP MQTT listener started on port {Port} → internal:{InternalPort} (tenant: {Tenant})",
+                port, internalPort, _options.Value.TenantName);
+        }
+
+        // ── IPC listener (named pipe / Unix domain socket) ───────────────
+        var ipcPath = _options.Value.IpcEndpointPath;
+        if (!string.IsNullOrWhiteSpace(ipcPath))
+        {
+            _ipcListenerTask = RunIpcListenerAsync(ipcPath, _listenerCts.Token);
+        }
+
+        _logger.LogInformation(
+            "MQTT broker started — internal TCP:{InternalPort} (localhost), external TCP:[{TcpPorts}], IPC:{IpcPath} (tenant: {Tenant})",
+            internalPort,
+            string.Join(", ", _options.Value.TcpListenerPorts.Select(p => p.ToString())),
+            ipcPath ?? "(disabled)",
+            _options.Value.TenantName);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_server is null) return;
+        if (_listenerCts is not null)
+        {
+            await _listenerCts.CancelAsync();
+        }
 
-        _server.ValidatingConnectionAsync -= OnValidateConnection;
-        _server.InterceptingPublishAsync -= OnInterceptPublish;
+        if (_server is not null)
+        {
+            _server.ValidatingConnectionAsync -= OnValidateConnection;
+            _server.InterceptingPublishAsync -= OnInterceptPublish;
 
-        await _server.StopAsync();
+            await _server.StopAsync();
+        }
+
+        foreach (var listener in _tcpListeners)
+        {
+            listener.Stop();
+        }
+
+        if (_listenerTasks.Count > 0)
+        {
+            await Task.WhenAll(_listenerTasks);
+        }
+
+        if (_ipcListenerTask is not null)
+        {
+            try { await _ipcListenerTask; } catch (OperationCanceledException) { }
+        }
 
         _logger.LogInformation("MQTT broker stopped (tenant: {Tenant})", _options.Value.TenantName);
     }
 
-    /// <summary>
-    /// Bridges a WebSocket connection to the local TCP MQTT broker via a loopback TCP connection.
-    /// MQTT over WebSocket is raw MQTT frames carried as binary WebSocket messages.
-    /// </summary>
-    public async Task BridgeWebSocketAsync(WebSocket ws, CancellationToken ct)
+    public async ValueTask DisposeAsync()
     {
-        // Connect a loopback TCP socket to the local broker
-        using var tcp = new System.Net.Sockets.TcpClient();
-        await tcp.ConnectAsync("127.0.0.1", _options.Value.BrokerPort, ct);
-        using var stream = tcp.GetStream();
+        _listenerCts?.Dispose();
 
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var wsToTcp = PumpWsToTcpAsync(ws, stream, cts.Token);
-        var tcpToWs = PumpTcpToWsAsync(stream, ws, cts.Token);
-
-        await Task.WhenAny(wsToTcp, tcpToWs);
-        cts.Cancel();
-
-        try { await Task.WhenAll(wsToTcp, tcpToWs); } catch { /* shutdown */ }
-    }
-
-    private static async Task PumpWsToTcpAsync(WebSocket ws, System.IO.Stream tcp, CancellationToken ct)
-    {
-        var buffer = new byte[8192];
-        try
+        foreach (var listener in _tcpListeners)
         {
-            while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
-            {
-                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
-                    return;
-                }
-                if (result.Count > 0)
-                    await tcp.WriteAsync(buffer.AsMemory(0, result.Count), ct);
-            }
+            listener.Stop();
         }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException) { }
+
+        if (_server is not null)
+        {
+            _server.Dispose();
+            _server = null;
+        }
     }
 
-    private static async Task PumpTcpToWsAsync(System.IO.Stream tcp, WebSocket ws, CancellationToken ct)
+    // ── External TCP listener loop ──────────────────────────────────────
+
+    /// <summary>
+    /// Accepts TCP connections on an external port and bridges each to the internal
+    /// localhost-only MQTTnet broker so the MQTT protocol is handled there.
+    /// </summary>
+    private async Task RunTcpListenerAsync(TcpListener listener, int port, CancellationToken ct)
     {
-        var buffer = new byte[8192];
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                var read = await tcp.ReadAsync(buffer, ct);
-                if (read == 0) return; // remote closed
-                if (ws.State == WebSocketState.Open)
-                    await ws.SendAsync(new ArraySegment<byte>(buffer, 0, read), WebSocketMessageType.Binary, true, ct);
+                var client = await listener.AcceptTcpClientAsync(ct);
+                _ = HandleTcpClientAsync(client, port, ct);
             }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException) { }
+        catch (ObjectDisposedException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "TCP listener on port {Port} failed", port);
+        }
     }
+
+    private async Task HandleTcpClientAsync(TcpClient client, int port, CancellationToken ct)
+    {
+        var remoteEp = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+        try
+        {
+            using (client)
+            using (var downstream = new TcpClient())
+            {
+                await downstream.ConnectAsync("127.0.0.1", _options.Value.InternalBrokerPort, ct);
+
+                await using var clientStream = client.GetStream();
+                await using var brokerStream = downstream.GetStream();
+
+                using var bridgeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var a = BridgeStreamAsync(clientStream, brokerStream, bridgeCts.Token);
+                var b = BridgeStreamAsync(brokerStream, clientStream, bridgeCts.Token);
+
+                await Task.WhenAny(a, b);
+                await bridgeCts.CancelAsync();
+
+                try { await Task.WhenAll(a, b); } catch { /* shutdown */ }
+            }
+
+            _logger.LogDebug("TCP bridge on port {Port} closed for {Remote}", port, remoteEp);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TCP bridge on port {Port} failed for {Remote}", port, remoteEp);
+        }
+    }
+
+    // ── IPC listener loop ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Listens on a named pipe (Windows) or Unix domain socket path (Linux/macOS) and bridges
+    /// each incoming connection to the internal MQTTnet broker via a loopback TCP connection.
+    /// </summary>
+    private async Task RunIpcListenerAsync(string pipeName, CancellationToken ct)
+    {
+        // Clean up stale socket file on Unix
+        if (!OperatingSystem.IsWindows() && File.Exists(pipeName))
+        {
+            try { File.Delete(pipeName); } catch { /* best effort */ }
+        }
+
+        _logger.LogInformation("IPC MQTT listener starting on {Path} (tenant: {Tenant})",
+            pipeName, _options.Value.TenantName);
+
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var pipeServer = new NamedPipeServerStream(
+                    pipeName,
+                    PipeDirection.InOut,
+                    NamedPipeServerStream.MaxAllowedServerInstances,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous);
+
+                try
+                {
+                    await pipeServer.WaitForConnectionAsync(ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    await pipeServer.DisposeAsync();
+                    break;
+                }
+                catch
+                {
+                    await pipeServer.DisposeAsync();
+                    throw;
+                }
+
+                _ = HandleIpcClientAsync(pipeServer, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "IPC listener on {Path} failed", pipeName);
+        }
+
+        _logger.LogInformation("IPC MQTT listener stopped on {Path} (tenant: {Tenant})",
+            pipeName, _options.Value.TenantName);
+    }
+
+    private async Task HandleIpcClientAsync(NamedPipeServerStream pipeServer, CancellationToken ct)
+    {
+        try
+        {
+            using (pipeServer)
+            using (var downstream = new TcpClient())
+            {
+                await downstream.ConnectAsync("127.0.0.1", _options.Value.InternalBrokerPort, ct);
+
+                await using var brokerStream = downstream.GetStream();
+
+                using var bridgeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var a = BridgeStreamAsync(pipeServer, brokerStream, bridgeCts.Token);
+                var b = BridgeStreamAsync(brokerStream, pipeServer, bridgeCts.Token);
+
+                await Task.WhenAny(a, b);
+                await bridgeCts.CancelAsync();
+
+                try { await Task.WhenAll(a, b); } catch { /* shutdown */ }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "IPC bridge client handling failed");
+        }
+    }
+
+    // ── Shared bidirectional stream bridge ──────────────────────────────
+
+    /// <summary>
+    /// Copies data from <paramref name="source"/> to <paramref name="destination"/> until
+    /// EOF or cancellation.
+    /// </summary>
+    private static async Task BridgeStreamAsync(Stream source, Stream destination, CancellationToken ct)
+    {
+        var buffer = new byte[8192];
+        try
+        {
+            int read;
+            while (!ct.IsCancellationRequested && (read = await source.ReadAsync(buffer, ct)) > 0)
+            {
+                await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
+    }
+
+    // ── MQTTnet event handlers ──────────────────────────────────────────
 
     private Task OnValidateConnection(ValidatingConnectionEventArgs args)
     {
