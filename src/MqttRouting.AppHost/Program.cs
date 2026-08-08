@@ -25,8 +25,9 @@ builder.AddProject("tenantB", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPla
     .WithEnvironment("TenantPlane__InternalBrokerPort", "11884")
     .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1887");
 
-// MqttGateway: MQTT-over-TLS only. Parses CONNECT, extracts tenant from
-// client ID, bridges TLS → TenantPlane with PPv2 client cert forwarding.
+// MqttGateway: MQTT-over-TLS reverse proxy. Two routing modes:
+//   SNI path:     passthrough to TenantPlane, route by SNI subdomain.
+//   No-SNI path:  decode CONNECT, route by username prefix, PPv2.
 builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj")
     .WithHttpEndpoint(targetPort: 18200)
     .WithEndpoint(targetPort: 8883, scheme: "tcp", name: "mqtt-tls")

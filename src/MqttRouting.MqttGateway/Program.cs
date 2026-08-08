@@ -29,7 +29,7 @@ app.MapGet("/", (IOptions<MqttGatewayOptions> options) =>
         baseDomain = options.Value.BaseDomain,
         mqttTlsListenPort = options.Value.MqttTlsListenPort,
         useTls = options.Value.HasTlsCert(),
-        routeTable = options.Value.RouteTable.Select(r => new { r.Tenant, r.Host, r.Port })
+        routeTable = options.Value.RouteTable.Select(r => new { r.Tenant, r.Host, r.Port, r.TlsPort })
     }));
 
 await app.RunAsync();
@@ -176,11 +176,11 @@ sealed class MqttTlsGatewayService : IHostedService
         var rawStream = client.GetStream();
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "?";
         X509Certificate2? clientCert = null;
+        string? sniHostName = null;
         Stream stream = rawStream;
 
         try
         {
-            // ── TLS handshake ─────────────────────────────────────
             var sslStream = new SslStream(rawStream, false,
                 (sender, certificate, chain, errors) => true, // accept any client cert
                 null);
@@ -193,6 +193,9 @@ sealed class MqttTlsGatewayService : IHostedService
                 EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                 CertificateRevocationCheckMode = X509RevocationMode.NoCheck
             }, ct);
+
+            // SNI hostname sent by the client (null if client did not send SNI)
+            sniHostName = sslStream.TargetHostName;
 
             if (sslStream.RemoteCertificate is X509Certificate2 remoteCert)
             {
@@ -217,6 +220,88 @@ sealed class MqttTlsGatewayService : IHostedService
             return;
         }
 
+        // ── Dispatch to the appropriate routing path ──
+        if (!string.IsNullOrEmpty(sniHostName))
+        {
+            // SNI path: passthrough, no CONNECT parsing, no PPv2.
+            // Routing is based on the subdomain of the SNI hostname.
+            _logger.LogInformation("MQTT gateway: SNI routing {Remote} SNI={SniHostName}",
+                remote, sniHostName);
+            await HandleSniRoutingAsync(stream, remote, sniHostName, ct);
+        }
+        else
+        {
+            // No-SNI path: decode MQTT CONNECT, extract tenant from
+            // username prefix, reverse-proxy with Proxy Protocol v2.
+            _logger.LogInformation("MQTT gateway: MQTT-connect routing {Remote} (no SNI, clientCert={HasCert})",
+                remote, clientCert is not null);
+            await HandleMqttRoutingAsync(stream, rawStream, client.Client.RemoteEndPoint as IPEndPoint,
+                remote, clientCert, ct);
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // SNI routing: passthrough (no MQTT CONNECT inspection, no PPv2)
+    // ───────────────────────────────────────────────────────────────────
+
+    private async Task HandleSniRoutingAsync(
+        Stream decryptedStream, string remote, string sniHostName,
+        CancellationToken ct)
+    {
+        var tenant = ExtractTenantFromHost(sniHostName, _options.BaseDomain);
+        if (tenant is null)
+        {
+            _logger.LogWarning("SNI routing: rejecting {Remote}, SNI={Sni}, no tenant in subdomain",
+                remote, sniHostName);
+            return;
+        }
+
+        var backend = _options.RouteTable.FirstOrDefault(r =>
+            string.Equals(r.Tenant, tenant, StringComparison.OrdinalIgnoreCase));
+        if (backend is null)
+        {
+            _logger.LogWarning("SNI routing: no backend for tenant {Tenant} (SNI={Sni})", tenant, sniHostName);
+            return;
+        }
+
+        _logger.LogInformation("SNI passthrough: {SniHostName} → tenant {Tenant} → {Host}:{Port}",
+            sniHostName, tenant, backend.Host, backend.Port);
+
+        try
+        {
+            using var downstream = new TcpClient();
+            await downstream.ConnectAsync(backend.Host, backend.Port, ct);
+            await using var downstreamStream = downstream.GetStream();
+
+            // Raw passthrough: no CONNECT inspection, no PPv2.
+            // All bytes are forwarded as-is after TLS termination.
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var upToDown = BridgeStreamAsync(decryptedStream, downstreamStream, linkedCts.Token);
+            var downToUp = BridgeStreamAsync(downstreamStream, decryptedStream, linkedCts.Token);
+
+            await Task.WhenAny(upToDown, downToUp);
+            linkedCts.Cancel();
+            try { await Task.WhenAll(upToDown, downToUp); } catch { /* shutdown */ }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SNI passthrough: error for {Remote} (SNI={Sni})", remote, sniHostName);
+        }
+
+        _logger.LogInformation("SNI passthrough: disconnected {Remote} (tenant {Tenant}, SNI={Sni})",
+            remote, tenant ?? "?", sniHostName);
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // No-SNI routing: decode MQTT CONNECT → username prefix → PPv2
+    // ───────────────────────────────────────────────────────────────────
+
+    private async Task HandleMqttRoutingAsync(
+        Stream decryptedStream, Stream rawStream, IPEndPoint? clientEp,
+        string remote, X509Certificate2? clientCert,
+        CancellationToken ct)
+    {
         string? tenant = null;
         string? clientId = null;
         int protocolLevel = 0;
@@ -224,9 +309,6 @@ sealed class MqttTlsGatewayService : IHostedService
 
         try
         {
-            _logger.LogInformation("MQTT gateway: accepted {Remote} (clientCert={HasCert})",
-                remote, clientCert is not null);
-
             // ── Read & parse MQTT CONNECT from stream ──
             byte[] connectBuffer = new byte[4096];
             const int maxBufferSize = 256 * 1024;
@@ -241,7 +323,7 @@ sealed class MqttTlsGatewayService : IHostedService
 
                 while (bytesRead < target)
                 {
-                    int n = await stream.ReadAsync(connectBuffer.AsMemory(bytesRead, target - bytesRead), ct);
+                    int n = await decryptedStream.ReadAsync(connectBuffer.AsMemory(bytesRead, target - bytesRead), ct);
                     if (n == 0) return false;
                     bytesRead += n;
                 }
@@ -276,6 +358,7 @@ sealed class MqttTlsGatewayService : IHostedService
             var protocolName = Encoding.UTF8.GetString(connectBuffer, protoNameStart, protoNameLen);
             var afterProtoName = protoNameEnd + 4;
             protocolLevel = connectBuffer[protoNameEnd];
+            var connectFlags = connectBuffer[protoNameEnd + 1];
 
             int payloadStart;
             if (string.Equals(protocolName, "MQTT", StringComparison.Ordinal) && protoNameLen == 4)
@@ -309,16 +392,53 @@ sealed class MqttTlsGatewayService : IHostedService
             }
             else return;
 
+            // ── Parse payload: clientId, then optionally username ──
             if (!await EnsureBufferAsync(payloadStart + 2)) return;
             var clientIdLength = (connectBuffer[payloadStart] << 8) | connectBuffer[payloadStart + 1];
             if (!await EnsureBufferAsync(payloadStart + 2 + clientIdLength)) return;
-
             clientId = Encoding.UTF8.GetString(connectBuffer, payloadStart + 2, clientIdLength);
-            tenant = ExtractTenant(clientId);
 
+            // Extract tenant from username prefix (e.g. "tenantA.device1" → "tenantA")
+            string? username = null;
+            int nextFieldPos = payloadStart + 2 + clientIdLength;
+
+            // Skip will topic + will message if will flag is set (bit 2)
+            if ((connectFlags & 0x04) != 0)
+            {
+                if (!await EnsureBufferAsync(nextFieldPos + 2)) return;
+                var willTopicLen = (connectBuffer[nextFieldPos] << 8) | connectBuffer[nextFieldPos + 1];
+                nextFieldPos += 2 + willTopicLen;
+
+                // MQTT 5: will message length; MQTT 3: will message is binary
+                if (protocolLevel == 5)
+                {
+                    await EnsureBufferAsync(nextFieldPos + 2);
+                    var willMsgLen = (connectBuffer[nextFieldPos] << 8) | connectBuffer[nextFieldPos + 1];
+                    nextFieldPos += 2 + willMsgLen;
+                }
+                else
+                {
+                    if (!await EnsureBufferAsync(nextFieldPos + 2)) return;
+                    var willMsgLen = (connectBuffer[nextFieldPos] << 8) | connectBuffer[nextFieldPos + 1];
+                    nextFieldPos += 2 + willMsgLen;
+                }
+            }
+
+            // Read username if username flag is set (bit 7)
+            if ((connectFlags & 0x80) != 0)
+            {
+                if (!await EnsureBufferAsync(nextFieldPos + 2)) return;
+                var usernameLen = (connectBuffer[nextFieldPos] << 8) | connectBuffer[nextFieldPos + 1];
+                if (!await EnsureBufferAsync(nextFieldPos + 2 + usernameLen)) return;
+                username = Encoding.UTF8.GetString(connectBuffer, nextFieldPos + 2, usernameLen);
+            }
+
+            tenant = ExtractTenant(username);
             if (tenant is null)
             {
-                _logger.LogWarning("Rejecting {Endpoint}: no tenant prefix in clientId '{ClientId}'", remote, clientId);
+                _logger.LogWarning(
+                    "MQTT routing: rejecting {Remote}, no tenant prefix in username '{Username}' (clientId='{ClientId}')",
+                    remote, username ?? "(none)", clientId);
                 byte[] reject = protocolLevel == 5
                     ? new byte[] { 0x20, 0x03, 0x00, 0x02, 0x00 }
                     : new byte[] { 0x20, 0x02, 0x00, 0x02 };
@@ -330,7 +450,8 @@ sealed class MqttTlsGatewayService : IHostedService
                 string.Equals(r.Tenant, tenant, StringComparison.OrdinalIgnoreCase));
             if (backend is null)
             {
-                _logger.LogWarning("No backend for tenant {Tenant} (client {ClientId})", tenant, clientId);
+                _logger.LogWarning("MQTT routing: no backend for tenant {Tenant} (username={Username})",
+                    tenant, username);
                 byte[] reject = protocolLevel == 5
                     ? new byte[] { 0x20, 0x03, 0x00, 0x02, 0x00 }
                     : new byte[] { 0x20, 0x02, 0x00, 0x02 };
@@ -338,8 +459,8 @@ sealed class MqttTlsGatewayService : IHostedService
                 return;
             }
 
-            _logger.LogInformation("Routing {ClientId} → tenant {Tenant} → {Host}:{Port} (cert={HasCert})",
-                clientId, tenant, backend.Host, backend.Port, clientCert is not null);
+            _logger.LogInformation("MQTT routing: {ClientId} (user={Username}) → tenant {Tenant} → {Host}:{Port}",
+                clientId, username, tenant, backend.Host, backend.Port);
 
             // ── Connect to TenantPlane via TCP ──
             using var downstream = new TcpClient();
@@ -349,7 +470,7 @@ sealed class MqttTlsGatewayService : IHostedService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to connect to TenantPlane {Host}:{Port}", backend.Host, backend.Port);
+                _logger.LogError(ex, "MQTT routing: failed to connect to {Host}:{Port}", backend.Host, backend.Port);
                 byte[] reject = protocolLevel == 5
                     ? new byte[] { 0x20, 0x03, 0x00, 0x03, 0x00 }
                     : new byte[] { 0x20, 0x02, 0x00, 0x03 };
@@ -360,8 +481,7 @@ sealed class MqttTlsGatewayService : IHostedService
             // ── Send Proxy Protocol v2 header (with client cert TLV if present) ──
             await using var downstreamStream = downstream.GetStream();
             var tenantLocalEp = downstream.Client.LocalEndPoint ?? new IPEndPoint(IPAddress.None, 0);
-            var srcEp = (client.Client.RemoteEndPoint as IPEndPoint)
-                ?? new IPEndPoint(IPAddress.None, 0);
+            var srcEp = clientEp ?? new IPEndPoint(IPAddress.None, 0);
             var proxyHeader = ProxyProtocol.BuildV2Header(srcEp, tenantLocalEp, clientCert);
             await downstreamStream.WriteAsync(proxyHeader, ct);
 
@@ -379,8 +499,8 @@ sealed class MqttTlsGatewayService : IHostedService
 
             // ── Bidirectional pump: client ↔ TenantPlane ──
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var upToDown = BridgeStreamAsync(stream, downstreamStream, linkedCts.Token);
-            var downToUp = BridgeStreamAsync(downstreamStream, stream, linkedCts.Token);
+            var upToDown = BridgeStreamAsync(decryptedStream, downstreamStream, linkedCts.Token);
+            var downToUp = BridgeStreamAsync(downstreamStream, decryptedStream, linkedCts.Token);
 
             await Task.WhenAny(upToDown, downToUp);
             linkedCts.Cancel();
@@ -390,20 +510,48 @@ sealed class MqttTlsGatewayService : IHostedService
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "MQTT gateway: error for {Remote}", remote);
+            _logger.LogDebug(ex, "MQTT routing: error for {Remote}", remote);
         }
 
         if (clientId is not null)
-            _logger.LogInformation("Client {ClientId} (tenant {Tenant}) disconnected", clientId, tenant ?? "?");
+            _logger.LogInformation("MQTT routing: {ClientId} (tenant {Tenant}) disconnected", clientId, tenant ?? "?");
     }
 
-    private static string? ExtractTenant(string clientId)
+    // ── Tenant extraction helpers ──────────────────────────────────────
+
+    /// <summary>
+    /// Extracts the tenant from the username prefix (e.g. "tenantA.device1" → "tenantA").
+    /// </summary>
+    private static string? ExtractTenant(string? value)
     {
-        var dot = clientId.IndexOf('.');
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var dot = value.IndexOf('.');
         if (dot <= 0) return null;
-        var tenant = clientId[..dot];
+        var tenant = value[..dot];
         return string.IsNullOrWhiteSpace(tenant) ? null : tenant;
     }
+
+    /// <summary>
+    /// Extracts the tenant from the SNI hostname subdomain
+    /// (e.g. "tenantA.example.com" → "tenantA").
+    /// </summary>
+    private static string? ExtractTenantFromHost(string hostName, string baseDomain)
+    {
+        if (string.IsNullOrWhiteSpace(hostName)) return null;
+        // Match: <tenant>.<baseDomain>  or  <tenant>.<baseDomain>:<port>
+        var suffix = "." + baseDomain.Trim('.');
+        var host = hostName;
+        var portIdx = host.IndexOf(':');
+        if (portIdx >= 0) host = host[..portIdx];
+
+        if (!host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var tenant = host[..^suffix.Length];
+        return string.IsNullOrWhiteSpace(tenant) ? null : tenant;
+    }
+
+    // ── Stream helper ──────────────────────────────────────────────────
 
     private static async Task BridgeStreamAsync(Stream source, Stream destination, CancellationToken ct)
     {
@@ -446,5 +594,10 @@ sealed record TenantBackend
 {
     public string Tenant { get; set; } = string.Empty;
     public string Host { get; set; } = string.Empty;
+
+    /// <summary>Plain TCP port for no-SNI (PPv2) connections.</summary>
     public int Port { get; set; } = 1883;
+
+    /// <summary>TLS port for SNI-passthrough connections. Falls back to <see cref="Port"/> if not set.</summary>
+    public int TlsPort { get; set; } = 0;
 }

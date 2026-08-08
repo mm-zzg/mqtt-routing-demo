@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Options;
 using MqttRouting.ServiceDefaults;
 using MqttRouting.TenantPlane;
@@ -18,6 +20,16 @@ builder.Services.AddOptions<TenantPlaneOptions>()
         // No default TCP listener ports — must be configured explicitly.
         // This avoids port conflicts with MqttGateway (1883) and other services
         // in local debug mode.
+
+        // TLS listener: generate a self-signed dev cert if a port is set but
+        // no certificate was provided (local debug convenience).
+        if (options.TlsListenerPort is > 0 && !options.HasTlsCert())
+        {
+            var domain = options.CustomDomain ?? $"{options.TenantName}.{options.BaseDomain}";
+            var cert = GenerateSelfSignedCert(domain);
+            options.TlsCertBase64 = Convert.ToBase64String(cert.Export(X509ContentType.Pkcs12));
+            options.TlsCertPassword = null;
+        }
     });
 builder.Services.AddSingleton<TenantMessageStore>();
 builder.Services.AddSingleton<MqttBrokerService>();
@@ -37,6 +49,7 @@ app.MapGet("/", (IOptions<TenantPlaneOptions> options) =>
         tenant.HttpPort,
         InternalBrokerPort = tenant.InternalBrokerPort,
         TcpListenerPorts = tenant.TcpListenerPorts,
+        TlsListenerPort = tenant.TlsListenerPort,
         IpcEndpoint = tenant.IpcEndpointPath ?? "(disabled)",
         CustomDomain = tenant.CustomDomain ?? $"{tenant.TenantName}.{tenant.BaseDomain}"
     });
@@ -54,8 +67,32 @@ app.MapGet("/broker", (IOptions<TenantPlaneOptions> options) => Results.Ok(new
     name = options.Value.TenantName,
     internalBrokerPort = options.Value.InternalBrokerPort,
     tcpListenerPorts = options.Value.TcpListenerPorts,
+    tlsListenerPort = options.Value.TlsListenerPort,
     ipcEndpoint = options.Value.IpcEndpointPath ?? "(disabled)",
     mode = "embedded"
 }));
 
 await app.RunAsync();
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+static X509Certificate2 GenerateSelfSignedCert(string subjectName)
+{
+    using var rsa = RSA.Create(2048);
+    var req = new CertificateRequest($"CN={subjectName}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+    // SAN for the custom domain
+    var sanBuilder = new SubjectAlternativeNameBuilder();
+    sanBuilder.AddDnsName(subjectName);
+    req.CertificateExtensions.Add(sanBuilder.Build());
+
+    // Basic constraints: not a CA
+    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+
+    // Extended key usage: server authentication
+    req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+        [new Oid("1.3.6.1.5.5.7.3.1")], false));
+
+    var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    return cert;
+}

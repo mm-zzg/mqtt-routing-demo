@@ -1,6 +1,10 @@
 using System.IO.Pipes;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Options;
 using MQTTnet;
 using MQTTnet.Server;
@@ -15,6 +19,9 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
     private readonly List<Task> _listenerTasks = [];
     private CancellationTokenSource? _listenerCts;
     private Task? _ipcListenerTask;
+    private Task? _tlsListenerTask;
+    private TcpListener? _tlsListener;
+    private X509Certificate2? _tlsCertificate;
 
     private readonly TenantMessageStore _store;
     private readonly IOptions<TenantPlaneOptions> _options;
@@ -69,6 +76,20 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
                 port, internalPort, _options.Value.TenantName);
         }
 
+        // ── TLS listener (SNI-passthrough from MqttGateway) ──────────────
+        var tlsPort = _options.Value.TlsListenerPort;
+        if (tlsPort.HasValue && _options.Value.HasTlsCert())
+        {
+            _tlsCertificate = await LoadTlsCertificateAsync(cancellationToken);
+
+            _tlsListener = new TcpListener(IPAddress.Any, tlsPort.Value);
+            _tlsListener.Start();
+            _tlsListenerTask = RunTlsListenerAsync(_tlsListener, tlsPort.Value, _listenerCts.Token);
+
+            _logger.LogInformation("External TLS MQTT listener started on port {Port} → internal:{InternalPort} (tenant: {Tenant})",
+                tlsPort.Value, internalPort, _options.Value.TenantName);
+        }
+
         // ── IPC listener (named pipe / Unix domain socket) ───────────────
         var ipcPath = _options.Value.IpcEndpointPath;
         if (!string.IsNullOrWhiteSpace(ipcPath))
@@ -77,9 +98,10 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
         }
 
         _logger.LogInformation(
-            "MQTT broker started — internal TCP:{InternalPort} (localhost), external TCP:[{TcpPorts}], IPC:{IpcPath} (tenant: {Tenant})",
+            "MQTT broker started — internal TCP:{InternalPort} (localhost), external TCP:[{TcpPorts}], TLS:{TlsPort}, IPC:{IpcPath} (tenant: {Tenant})",
             internalPort,
             string.Join(", ", _options.Value.TcpListenerPorts.Select(p => p.ToString())),
+            tlsPort?.ToString() ?? "(disabled)",
             ipcPath ?? "(disabled)",
             _options.Value.TenantName);
     }
@@ -89,6 +111,13 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
         if (_listenerCts is not null)
         {
             await _listenerCts.CancelAsync();
+        }
+
+        _tlsListener?.Stop();
+
+        if (_tlsListenerTask is not null)
+        {
+            try { await _tlsListenerTask; } catch (OperationCanceledException) { }
         }
 
         if (_server is not null)
@@ -121,6 +150,8 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
     {
         await ValueTask.CompletedTask;
         _listenerCts?.Dispose();
+        _tlsListener?.Stop();
+        _tlsCertificate?.Dispose();
 
         foreach (var listener in _tcpListeners)
         {
@@ -335,6 +366,130 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
         }
         catch (OperationCanceledException) { }
         catch (IOException) { }
+    }
+
+    // ── TLS listener (SNI-passthrough from MqttGateway) ────────────────
+
+    private async Task<X509Certificate2> LoadTlsCertificateAsync(CancellationToken ct)
+    {
+        var opts = _options.Value;
+        if (!string.IsNullOrWhiteSpace(opts.TlsCertBase64))
+        {
+            var bytes = Convert.FromBase64String(opts.TlsCertBase64);
+            return string.IsNullOrEmpty(opts.TlsCertPassword)
+                ? X509CertificateLoader.LoadPkcs12(bytes)
+                : X509CertificateLoader.LoadPkcs12(bytes, opts.TlsCertPassword);
+        }
+        if (!string.IsNullOrWhiteSpace(opts.TlsCertPath) && File.Exists(opts.TlsCertPath))
+        {
+            var bytes = await File.ReadAllBytesAsync(opts.TlsCertPath, ct);
+            return string.IsNullOrEmpty(opts.TlsCertPassword)
+                ? X509CertificateLoader.LoadPkcs12(bytes)
+                : X509CertificateLoader.LoadPkcs12(bytes, opts.TlsCertPassword);
+        }
+        throw new InvalidOperationException("No TLS certificate configured for TenantPlane TLS listener.");
+    }
+
+    private async Task RunTlsListenerAsync(TcpListener listener, int port, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var client = await listener.AcceptTcpClientAsync(ct);
+                _ = HandleTlsClientAsync(client, port, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "TLS listener on port {Port} failed", port);
+        }
+    }
+
+    /// <summary>
+    /// Handles a TLS connection forwarded by the MqttGateway via SNI passthrough.
+    /// Terminates TLS at the TenantPlane, extracts the client certificate, and
+    /// bridges the decrypted MQTT stream to the internal broker.
+    /// </summary>
+    private async Task HandleTlsClientAsync(TcpClient client, int port, CancellationToken ct)
+    {
+        var remoteEp = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+        try
+        {
+            using (client)
+            {
+                await using var rawStream = client.GetStream();
+                await using var sslStream = new SslStream(rawStream, leaveInnerStreamOpen: false);
+
+                var sslOptions = new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = _tlsCertificate,
+                    ClientCertificateRequired = false, // accept both with and without client cert
+                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13
+                };
+
+                await sslStream.AuthenticateAsServerAsync(sslOptions, ct);
+
+                // Extract client certificate from the TLS handshake
+                var clientCert = sslStream.RemoteCertificate as X509Certificate2;
+                ProxyProtocol.X509CertInfo? certInfo = null;
+                if (clientCert is not null)
+                {
+                    certInfo = new ProxyProtocol.X509CertInfo(
+                        clientCert.GetCertHash(HashAlgorithmName.SHA256),
+                        clientCert.Subject,
+                        clientCert.Issuer);
+                }
+
+                CurrentClientCert.Value = certInfo;
+
+                if (certInfo is not null)
+                {
+                    _logger.LogInformation(
+                        "TLS bridge on port {Port}: accepted {Remote} cert={CertSubject} thumbprint={Thumbprint}",
+                        port, remoteEp, certInfo.Subject,
+                        Convert.ToHexString(certInfo.ThumbprintSha256));
+                }
+                else
+                {
+                    _logger.LogInformation("TLS bridge on port {Port}: accepted {Remote} (no client cert)",
+                        port, remoteEp);
+                }
+
+                using (var downstream = new TcpClient())
+                {
+                    await downstream.ConnectAsync("127.0.0.1", _options.Value.InternalBrokerPort, ct);
+                    await using var brokerStream = downstream.GetStream();
+
+                    using var bridgeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var a = BridgeStreamAsync(sslStream, brokerStream, bridgeCts.Token);
+                    var b = BridgeStreamAsync(brokerStream, sslStream, bridgeCts.Token);
+
+                    await Task.WhenAny(a, b);
+                    await bridgeCts.CancelAsync();
+
+                    try { await Task.WhenAll(a, b); } catch { /* shutdown */ }
+                }
+
+                _logger.LogDebug("TLS bridge on port {Port} closed for {Remote}", port, remoteEp);
+            }
+        }
+        catch (AuthenticationException ex)
+        {
+            _logger.LogWarning(ex, "TLS handshake failed on port {Port} from {Remote}", port, remoteEp);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TLS bridge on port {Port} failed for {Remote}", port, remoteEp);
+        }
+        finally
+        {
+            CurrentClientCert.Value = null;
+        }
     }
 
     // ── MQTTnet event handlers ──────────────────────────────────────────
