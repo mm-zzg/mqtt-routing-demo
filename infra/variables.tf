@@ -1,6 +1,12 @@
 variable "resource_group_name" {
   type        = string
-  description = "Existing Azure resource group name. Must be pre-created manually."
+  description = "Azure resource group name managed by this Terraform stack when deploy_resources is true."
+}
+
+variable "deploy_resources" {
+  type        = bool
+  description = "Whether to keep this Terraform stack deployed. Set to false and run apply to destroy all managed resources."
+  default     = true
 }
 
 variable "name_prefix" {
