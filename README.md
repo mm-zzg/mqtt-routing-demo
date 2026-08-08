@@ -5,8 +5,8 @@ This repo is a proof-of-concept for the architecture in the diagram:
 - .NET Aspire AppHost for local orchestration
 - tenant plane services for broker + HTTP listener
 - local-only custom ingress simulator for Azure Container Apps ingress; it is not deployed to Azure
-- Azure Container Apps native ingress for production traffic
-- MQTT gateway (TCP → WebSocket bridge)
+- Azure Container Apps native ingress for production traffic (HTTP)
+- MQTT gateway (public-facing, TCP → TCP bridge with tenant routing)
 - client simulator UI for managing ongoing simulated MQTT clients and client certificates
 - Terraform for Azure Container Apps, DNS, and certificates
 - GitHub Actions for build and deploy automation

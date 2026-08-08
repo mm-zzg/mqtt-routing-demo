@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Options;
 using MQTTnet;
 using MQTTnet.Server;
+using MqttRouting.ServiceDefaults;
 
 namespace MqttRouting.TenantPlane;
 
@@ -118,6 +119,7 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        await ValueTask.CompletedTask;
         _listenerCts?.Dispose();
 
         foreach (var listener in _tcpListeners)
@@ -156,17 +158,55 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Stores the client certificate info for the current connection being handled.
+    /// Populated during PPv2 parsing and consumed by <see cref="OnValidateConnection"/>.
+    /// </summary>
+    private static readonly System.Threading.AsyncLocal<ProxyProtocol.X509CertInfo?> CurrentClientCert = new();
+
     private async Task HandleTcpClientAsync(TcpClient client, int port, CancellationToken ct)
     {
         var remoteEp = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+        IPEndPoint? originalSource = null;
+        ProxyProtocol.X509CertInfo? clientCert = null;
         try
         {
+            // ── Parse Proxy Protocol v2 header (with optional client cert TLV) ──
+            await using var clientStream = client.GetStream();
+            try
+            {
+                var ppResult = await ProxyProtocol.ReadV2HeaderFullAsync(clientStream, ct);
+                originalSource = ppResult.Source;
+                clientCert = ppResult.ClientCert;
+            }
+            catch
+            {
+                // If PPv2 parsing fails, proceed without it
+            }
+
+            // Set AsyncLocal so OnValidateConnection can access the cert
+            CurrentClientCert.Value = clientCert;
+
+            var originalRemote = originalSource?.ToString() ?? remoteEp;
+            if (clientCert is not null)
+            {
+                _logger.LogInformation(
+                    "TCP bridge on port {Port}: accepted {Remote} (original {Original}) cert={CertSubject} thumbprint={Thumbprint}",
+                    port, remoteEp, originalRemote,
+                    clientCert.Subject,
+                    Convert.ToHexString(clientCert.ThumbprintSha256));
+            }
+            else
+            {
+                _logger.LogInformation("TCP bridge on port {Port}: accepted {Remote} (original {Original})",
+                    port, remoteEp, originalRemote);
+            }
+
             using (client)
             using (var downstream = new TcpClient())
             {
                 await downstream.ConnectAsync("127.0.0.1", _options.Value.InternalBrokerPort, ct);
 
-                await using var clientStream = client.GetStream();
                 await using var brokerStream = downstream.GetStream();
 
                 using var bridgeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -179,12 +219,16 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
                 try { await Task.WhenAll(a, b); } catch { /* shutdown */ }
             }
 
-            _logger.LogDebug("TCP bridge on port {Port} closed for {Remote}", port, remoteEp);
+            _logger.LogDebug("TCP bridge on port {Port} closed for {Remote}", port, originalRemote);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "TCP bridge on port {Port} failed for {Remote}", port, remoteEp);
+        }
+        finally
+        {
+            CurrentClientCert.Value = null;
         }
     }
 
@@ -297,8 +341,20 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
 
     private Task OnValidateConnection(ValidatingConnectionEventArgs args)
     {
-        _logger.LogInformation("MQTT client connecting: {ClientId} (tenant: {Tenant})",
-            args.ClientId, _options.Value.TenantName);
+        var cert = CurrentClientCert.Value;
+        if (cert is not null)
+        {
+            _logger.LogInformation(
+                "MQTT client connecting: {ClientId} (tenant: {Tenant}) cert={CertSubject} thumbprint={Thumbprint}",
+                args.ClientId, _options.Value.TenantName,
+                cert.Subject,
+                Convert.ToHexString(cert.ThumbprintSha256));
+        }
+        else
+        {
+            _logger.LogInformation("MQTT client connecting: {ClientId} (tenant: {Tenant})",
+                args.ClientId, _options.Value.TenantName);
+        }
         return Task.CompletedTask;
     }
 

@@ -326,6 +326,27 @@ resource "azurerm_container_app" "mqtt_gateway" {
       }
 
       env {
+        name  = "MqttGateway__MqttTlsListenPort"
+        value = "8883"
+      }
+
+      # TLS certificate (Cloudflare Origin CA).
+      # To enable TLS on port 8883, set TlsCertBase64 to the base64-encoded
+      # .origin.pfx generated below, and TlsCertPassword to the PFX password.
+      # Example via Azure portal: add secrets with keys MqttGateway__TlsCertBase64
+      # and MqttGateway__TlsCertPassword.
+      # env {
+      #   name        = "MqttGateway__TlsCertBase64"
+      #   secret_name = "tls-cert-base64"
+      #   value       = ""
+      # }
+      # env {
+      #   name        = "MqttGateway__TlsCertPassword"
+      #   secret_name = "tls-cert-password"
+      #   value       = ""
+      # }
+
+      env {
         name  = "MqttGateway__RouteTable__0__Tenant"
         value = var.tenant_names[0]
       }
