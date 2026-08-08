@@ -376,16 +376,12 @@ internal sealed class MqttBrokerService : IHostedService, IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(opts.TlsCertBase64))
         {
             var bytes = Convert.FromBase64String(opts.TlsCertBase64);
-            return string.IsNullOrEmpty(opts.TlsCertPassword)
-                ? X509CertificateLoader.LoadPkcs12(bytes)
-                : X509CertificateLoader.LoadPkcs12(bytes, opts.TlsCertPassword);
+            return X509CertificateLoader.LoadPkcs12(bytes, opts.TlsCertPassword);
         }
         if (!string.IsNullOrWhiteSpace(opts.TlsCertPath) && File.Exists(opts.TlsCertPath))
         {
             var bytes = await File.ReadAllBytesAsync(opts.TlsCertPath, ct);
-            return string.IsNullOrEmpty(opts.TlsCertPassword)
-                ? X509CertificateLoader.LoadPkcs12(bytes)
-                : X509CertificateLoader.LoadPkcs12(bytes, opts.TlsCertPassword);
+            return X509CertificateLoader.LoadPkcs12(bytes, opts.TlsCertPassword);
         }
         throw new InvalidOperationException("No TLS certificate configured for TenantPlane TLS listener.");
     }

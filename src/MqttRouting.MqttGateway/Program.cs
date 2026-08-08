@@ -168,23 +168,228 @@ sealed class MqttTlsGatewayService : IHostedService
         catch (SocketException) { }
     }
 
-    // ── Per-connection handler (TLS only) ──────────────────────────────
+    // ── Per-connection handler: peek ClientHello → SNI or terminate TLS ──
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
     {
         using var __ = client;
         var rawStream = client.GetStream();
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "?";
-        X509Certificate2? clientCert = null;
-        string? sniHostName = null;
-        Stream stream = rawStream;
 
         try
         {
-            var sslStream = new SslStream(rawStream, false,
-                (sender, certificate, chain, errors) => true, // accept any client cert
-                null);
-            stream = sslStream;
+            // Step 1: Peek at TLS ClientHello for SNI without terminating TLS.
+            var (sniHostName, clientHelloBuffer) = await PeekClientHelloSniAsync(rawStream, ct);
+
+            if (sniHostName is not null)
+            {
+                // ── SNI path: true TLS passthrough ──
+                //   Gateway forwards encrypted bytes → TenantPlane TLS port.
+                //   TenantPlane terminates TLS and extracts client cert.
+                await HandleSniPassthroughAsync(rawStream, clientHelloBuffer, remote, sniHostName, ct);
+            }
+            else
+            {
+                // ── No-SNI path: terminate TLS, decode MQTT CONNECT, PPv2 ──
+                var prefixedStream = new PrefixedStream(clientHelloBuffer, rawStream);
+                await HandleNoSniRoutingAsync(prefixedStream, rawStream, client, remote, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "MQTT gateway: connection failed for {Remote}", remote);
+        }
+    }
+
+    // ── TLS ClientHello SNI peeking (SslStream is NOT used here) ───────
+
+    /// <summary>
+    /// Reads and parses the TLS ClientHello to extract the SNI hostname
+    /// <em>without</em> completing the TLS handshake. Returns the SNI
+    /// hostname (or null) and all bytes consumed (must be replayed if the
+    /// caller subsequently wraps the stream in SslStream).
+    /// </summary>
+    private static async Task<(string? sniHostName, byte[] buffer)> PeekClientHelloSniAsync(
+        Stream stream, CancellationToken ct)
+    {
+        byte[] buffer = new byte[4096];
+        int bytesRead = 0;
+
+        async ValueTask<bool> Ensure(int target)
+        {
+            while (buffer.Length < target)
+            {
+                if (target > 65536) return false;
+                Array.Resize(ref buffer, buffer.Length * 2);
+            }
+            while (bytesRead < target)
+            {
+                int n = await stream.ReadAsync(buffer.AsMemory(bytesRead, target - bytesRead), ct);
+                if (n == 0) return false;
+                bytesRead += n;
+            }
+            return true;
+        }
+
+        // TLS record header: 5 bytes (ContentType:1, Version:2, Length:2)
+        if (!await Ensure(5)) return (null, buffer[..bytesRead]);
+
+        if (buffer[0] != 0x16) // Must be Handshake
+            return (null, buffer[..bytesRead]);
+
+        int recordLen = (buffer[3] << 8) | buffer[4];
+        int totalRecord = 5 + recordLen;
+        if (!await Ensure(totalRecord)) return (null, buffer[..bytesRead]);
+
+        // Handshake header at offset 5
+        if (buffer[5] != 0x01) // Must be ClientHello
+            return (null, buffer[..bytesRead]);
+
+        int handshakeLen = (buffer[6] << 16) | (buffer[7] << 8) | buffer[8];
+        int pos = 9;
+        int clientHelloEnd = pos + handshakeLen;
+
+        // Skip: client_version (2) + random (32)
+        pos += 34;
+
+        // Session ID
+        if (pos >= totalRecord) return (null, buffer[..bytesRead]);
+        int sessionIdLen = buffer[pos++];
+        pos += sessionIdLen;
+
+        // Cipher suites
+        if (pos + 2 > totalRecord) return (null, buffer[..bytesRead]);
+        int cipherSuitesLen = (buffer[pos] << 8) | buffer[pos + 1];
+        pos += 2 + cipherSuitesLen;
+
+        // Compression methods
+        if (pos >= totalRecord) return (null, buffer[..bytesRead]);
+        int compMethodsLen = buffer[pos++];
+        pos += compMethodsLen;
+
+        // Extensions
+        if (pos + 2 > clientHelloEnd || pos + 2 > totalRecord)
+            return (null, buffer[..bytesRead]);
+        int extensionsLen = (buffer[pos] << 8) | buffer[pos + 1];
+        pos += 2;
+        int extensionsEnd = pos + extensionsLen;
+
+        // Scan extensions for SNI (type 0x0000)
+        while (pos + 4 <= extensionsEnd && pos + 4 <= totalRecord)
+        {
+            int extType = (buffer[pos] << 8) | buffer[pos + 1];
+            int extLen = (buffer[pos + 2] << 8) | buffer[pos + 3];
+            pos += 4;
+
+            if (extType == 0x0000) // SNI
+            {
+                if (pos + 2 > extensionsEnd) break;
+                int listLen = (buffer[pos] << 8) | buffer[pos + 1];
+                pos += 2;
+
+                if (listLen > 0 && pos + 3 <= extensionsEnd)
+                {
+                    int nameType = buffer[pos++]; // 0 = hostname
+                    int nameLen = (buffer[pos] << 8) | buffer[pos + 1];
+                    pos += 2;
+
+                    if (nameType == 0 && nameLen > 0 && pos + nameLen <= totalRecord)
+                    {
+                        return (Encoding.ASCII.GetString(buffer, pos, nameLen),
+                                buffer[..bytesRead]);
+                    }
+                }
+                break;
+            }
+
+            pos += extLen;
+        }
+
+        return (null, buffer[..bytesRead]);
+    }
+
+    // ── SNI passthrough (true TLS passthrough, TLS NOT terminated here) ─
+
+    /// <summary>
+    /// Forwards the raw TLS stream (ClientHello + subsequent encrypted bytes)
+    /// to the TenantPlane TLS port without terminating TLS at the gateway.
+    /// The TenantPlane terminates TLS and extracts the client certificate.
+    /// Routing is based on the SNI subdomain.
+    /// </summary>
+    private async Task HandleSniPassthroughAsync(
+        Stream rawStream, byte[] clientHelloBuffer, string remote,
+        string sniHostName, CancellationToken ct)
+    {
+        var tenant = ExtractTenantFromHost(sniHostName, _options.BaseDomain);
+        if (tenant is null)
+        {
+            _logger.LogWarning(
+                "SNI passthrough: rejecting {Remote}, SNI={Sni}, no tenant in subdomain",
+                remote, sniHostName);
+            return;
+        }
+
+        var backend = _options.RouteTable.FirstOrDefault(r =>
+            string.Equals(r.Tenant, tenant, StringComparison.OrdinalIgnoreCase));
+        if (backend is null)
+        {
+            _logger.LogWarning(
+                "SNI passthrough: no backend for tenant {Tenant} (SNI={Sni})",
+                tenant, sniHostName);
+            return;
+        }
+
+        var targetPort = backend.TlsPort > 0 ? backend.TlsPort : backend.Port;
+        _logger.LogInformation(
+            "SNI passthrough: {SniHostName} → tenant {Tenant} → {Host}:{Port} (TLS end-to-end)",
+            sniHostName, tenant, backend.Host, targetPort);
+
+        try
+        {
+            using var downstream = new TcpClient();
+            await downstream.ConnectAsync(backend.Host, targetPort, ct);
+            await using var downstreamStream = downstream.GetStream();
+
+            // Forward the buffered ClientHello bytes first
+            // (TLS was NOT terminated — these are still encrypted!)
+            await downstreamStream.WriteAsync(clientHelloBuffer, ct);
+
+            // Bidirectional bridge of the remaining encrypted bytes
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var upToDown = BridgeStreamAsync(rawStream, downstreamStream, linkedCts.Token);
+            var downToUp = BridgeStreamAsync(downstreamStream, rawStream, linkedCts.Token);
+
+            await Task.WhenAny(upToDown, downToUp);
+            await linkedCts.CancelAsync();
+            try { await Task.WhenAll(upToDown, downToUp); } catch { /* shutdown */ }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "SNI passthrough: error for {Remote} (SNI={Sni})", remote, sniHostName);
+        }
+
+        _logger.LogInformation(
+            "SNI passthrough: disconnected {Remote} (tenant {Tenant}, SNI={Sni})",
+            remote, tenant, sniHostName);
+    }
+
+    // ── No-SNI routing: terminate TLS → MQTT CONNECT → PPv2 ────────────
+
+    /// <summary>
+    /// Terminates TLS, extracts the client certificate, then dispatches to
+    /// MQTT CONNECT inspection with Proxy Protocol v2 forwarding.
+    /// </summary>
+    private async Task HandleNoSniRoutingAsync(
+        Stream stream, Stream rawStream, TcpClient client, string remote,
+        CancellationToken ct)
+    {
+        try
+        {
+            var sslStream = new SslStream(stream, false,
+                (sender, certificate, chain, errors) => true, null);
 
             await sslStream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
             {
@@ -194,103 +399,31 @@ sealed class MqttTlsGatewayService : IHostedService
                 CertificateRevocationCheckMode = X509RevocationMode.NoCheck
             }, ct);
 
-            // SNI hostname sent by the client (null if client did not send SNI)
-            sniHostName = sslStream.TargetHostName;
-
-            if (sslStream.RemoteCertificate is X509Certificate2 remoteCert)
+            var clientCert = sslStream.RemoteCertificate as X509Certificate2;
+            if (clientCert is not null)
             {
-                clientCert = remoteCert;
-                _logger.LogInformation("MQTT TLS gateway: client {Remote} presented cert {Subject} ({Thumbprint})",
+                _logger.LogInformation(
+                    "MQTT TLS gateway: client {Remote} presented cert {Subject} ({Thumbprint})",
                     remote, clientCert.Subject,
                     Convert.ToHexString(clientCert.GetCertHash(HashAlgorithmName.SHA256)));
             }
             else
             {
-                _logger.LogInformation("MQTT TLS gateway: client {Remote} connected (no client cert)", remote);
+                _logger.LogInformation(
+                    "MQTT TLS gateway: client {Remote} connected (no client cert)", remote);
             }
+
+            _logger.LogInformation(
+                "MQTT gateway: MQTT-connect routing {Remote} (no SNI, clientCert={HasCert})",
+                remote, clientCert is not null);
+
+            await HandleMqttRoutingAsync(sslStream, rawStream,
+                client.Client.RemoteEndPoint as IPEndPoint, remote, clientCert, ct);
         }
         catch (AuthenticationException ex)
         {
             _logger.LogWarning(ex, "TLS handshake failed for {Remote}", remote);
-            return;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Connection setup failed for {Remote}", remote);
-            return;
-        }
-
-        // ── Dispatch to the appropriate routing path ──
-        if (!string.IsNullOrEmpty(sniHostName))
-        {
-            // SNI path: passthrough, no CONNECT parsing, no PPv2.
-            // Routing is based on the subdomain of the SNI hostname.
-            _logger.LogInformation("MQTT gateway: SNI routing {Remote} SNI={SniHostName}",
-                remote, sniHostName);
-            await HandleSniRoutingAsync(stream, remote, sniHostName, ct);
-        }
-        else
-        {
-            // No-SNI path: decode MQTT CONNECT, extract tenant from
-            // username prefix, reverse-proxy with Proxy Protocol v2.
-            _logger.LogInformation("MQTT gateway: MQTT-connect routing {Remote} (no SNI, clientCert={HasCert})",
-                remote, clientCert is not null);
-            await HandleMqttRoutingAsync(stream, rawStream, client.Client.RemoteEndPoint as IPEndPoint,
-                remote, clientCert, ct);
-        }
-    }
-
-    // ───────────────────────────────────────────────────────────────────
-    // SNI routing: passthrough (no MQTT CONNECT inspection, no PPv2)
-    // ───────────────────────────────────────────────────────────────────
-
-    private async Task HandleSniRoutingAsync(
-        Stream decryptedStream, string remote, string sniHostName,
-        CancellationToken ct)
-    {
-        var tenant = ExtractTenantFromHost(sniHostName, _options.BaseDomain);
-        if (tenant is null)
-        {
-            _logger.LogWarning("SNI routing: rejecting {Remote}, SNI={Sni}, no tenant in subdomain",
-                remote, sniHostName);
-            return;
-        }
-
-        var backend = _options.RouteTable.FirstOrDefault(r =>
-            string.Equals(r.Tenant, tenant, StringComparison.OrdinalIgnoreCase));
-        if (backend is null)
-        {
-            _logger.LogWarning("SNI routing: no backend for tenant {Tenant} (SNI={Sni})", tenant, sniHostName);
-            return;
-        }
-
-        _logger.LogInformation("SNI passthrough: {SniHostName} → tenant {Tenant} → {Host}:{Port}",
-            sniHostName, tenant, backend.Host, backend.Port);
-
-        try
-        {
-            using var downstream = new TcpClient();
-            await downstream.ConnectAsync(backend.Host, backend.Port, ct);
-            await using var downstreamStream = downstream.GetStream();
-
-            // Raw passthrough: no CONNECT inspection, no PPv2.
-            // All bytes are forwarded as-is after TLS termination.
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var upToDown = BridgeStreamAsync(decryptedStream, downstreamStream, linkedCts.Token);
-            var downToUp = BridgeStreamAsync(downstreamStream, decryptedStream, linkedCts.Token);
-
-            await Task.WhenAny(upToDown, downToUp);
-            linkedCts.Cancel();
-            try { await Task.WhenAll(upToDown, downToUp); } catch { /* shutdown */ }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "SNI passthrough: error for {Remote} (SNI={Sni})", remote, sniHostName);
-        }
-
-        _logger.LogInformation("SNI passthrough: disconnected {Remote} (tenant {Tenant}, SNI={Sni})",
-            remote, tenant ?? "?", sniHostName);
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -566,6 +699,68 @@ sealed class MqttTlsGatewayService : IHostedService
         }
         catch (OperationCanceledException) { }
         catch (IOException) { }
+    }
+}
+
+// ── PrefixedStream: replays buffered bytes before delegating ──────────
+//   Used to replay ClientHello bytes after SNI peeking so that SslStream
+//   sees the complete TLS handshake from the beginning.
+
+sealed class PrefixedStream : Stream
+{
+    private readonly byte[] _prefix;
+    private readonly Stream _inner;
+    private int _position;
+
+    public PrefixedStream(byte[] prefix, Stream inner)
+    {
+        _prefix = prefix;
+        _inner = inner;
+    }
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        if (_position < _prefix.Length)
+        {
+            int n = Math.Min(count, _prefix.Length - _position);
+            Buffer.BlockCopy(_prefix, _position, buffer, offset, n);
+            _position += n;
+            return n;
+        }
+        return _inner.Read(buffer, offset, count);
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+    {
+        if (_position < _prefix.Length)
+        {
+            int n = Math.Min(buffer.Length, _prefix.Length - _position);
+            _prefix.AsMemory(_position, n).CopyTo(buffer);
+            _position += n;
+            return n;
+        }
+        return await _inner.ReadAsync(buffer, ct);
+    }
+
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _inner.Dispose();
+        base.Dispose(disposing);
     }
 }
 

@@ -3,31 +3,35 @@ using Aspire.Hosting;
 var builder = DistributedApplication.CreateBuilder(args);
 var baseDomain = builder.Configuration["BaseDomain"] ?? "example.com";
 
-// TenantPlane A: internal broker on 11883 (localhost), external TCP listeners on 1886
+// TenantPlane A: internal broker on 11883 (localhost), external TCP 1886, TLS 8886
 builder.AddProject("tenantA", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj")
     .WithHttpEndpoint(targetPort: 18080)
     .WithEndpoint(targetPort: 1886, scheme: "tcp", name: "mqtt")
+    .WithEndpoint(targetPort: 8886, scheme: "tcp", name: "mqtt-tls")
     .WithEnvironment("TenantPlane__TenantName", "tenantA")
     .WithEnvironment("TenantPlane__BaseDomain", baseDomain)
     .WithEnvironment("TenantPlane__CustomDomain", $"tenantA.{baseDomain}")
     .WithEnvironment("TenantPlane__HttpPort", "18080")
     .WithEnvironment("TenantPlane__InternalBrokerPort", "11883")
-    .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1886");
+    .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1886")
+    .WithEnvironment("TenantPlane__TlsListenerPort", "8886");
 
-// TenantPlane B: internal broker on 11884 (localhost), external TCP listener on 1887
+// TenantPlane B: internal broker on 11884 (localhost), external TCP 1887, TLS 8887
 builder.AddProject("tenantB", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPlane.csproj")
     .WithHttpEndpoint(targetPort: 18081)
     .WithEndpoint(targetPort: 1887, scheme: "tcp", name: "mqtt")
+    .WithEndpoint(targetPort: 8887, scheme: "tcp", name: "mqtt-tls")
     .WithEnvironment("TenantPlane__TenantName", "tenantB")
     .WithEnvironment("TenantPlane__BaseDomain", baseDomain)
     .WithEnvironment("TenantPlane__CustomDomain", $"tenantB.{baseDomain}")
     .WithEnvironment("TenantPlane__HttpPort", "18081")
     .WithEnvironment("TenantPlane__InternalBrokerPort", "11884")
-    .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1887");
+    .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1887")
+    .WithEnvironment("TenantPlane__TlsListenerPort", "8887");
 
 // MqttGateway: MQTT-over-TLS reverse proxy. Two routing modes:
-//   SNI path:     passthrough to TenantPlane, route by SNI subdomain.
-//   No-SNI path:  decode CONNECT, route by username prefix, PPv2.
+//   SNI path:     true TLS passthrough → TenantPlane TLS port (end-to-end encrypted).
+//   No-SNI path:  terminate TLS → decode CONNECT → route by username prefix → PPv2.
 builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj")
     .WithHttpEndpoint(targetPort: 18200)
     .WithEndpoint(targetPort: 8883, scheme: "tcp", name: "mqtt-tls")
@@ -36,9 +40,11 @@ builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.Mqtt
     .WithEnvironment("MqttGateway__RouteTable__0__Tenant", "tenantA")
     .WithEnvironment("MqttGateway__RouteTable__0__Host", "localhost")
     .WithEnvironment("MqttGateway__RouteTable__0__Port", "1886")
+    .WithEnvironment("MqttGateway__RouteTable__0__TlsPort", "8886")
     .WithEnvironment("MqttGateway__RouteTable__1__Tenant", "tenantB")
     .WithEnvironment("MqttGateway__RouteTable__1__Host", "localhost")
-    .WithEnvironment("MqttGateway__RouteTable__1__Port", "1887");
+    .WithEnvironment("MqttGateway__RouteTable__1__Port", "1887")
+    .WithEnvironment("MqttGateway__RouteTable__1__TlsPort", "8887");
 
 // Ingress: HTTP-only entry point. Routes web traffic by Host header to TenantPlanes.
 builder.AddProject("ingress", @"..\MqttRouting.Ingress\MqttRouting.Ingress.csproj")
