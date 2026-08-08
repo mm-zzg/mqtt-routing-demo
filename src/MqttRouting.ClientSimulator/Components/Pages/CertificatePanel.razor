@@ -21,6 +21,9 @@
             <button class="btn btn-primary" type="submit" disabled="@IsSaving">
                 @(IsSaving ? "Saving..." : "Save certificate")
             </button>
+            <button class="btn btn-outline-secondary ms-2" type="button" disabled="@IsSaving" @onclick="HandleGenerateCertificate">
+                @(IsSaving ? "Generating..." : "Generate self-signed")
+            </button>
         </EditForm>
     </div>
 </div>
@@ -121,6 +124,32 @@
         catch (Exception ex)
         {
             await OnError.InvokeAsync($"Failed to add certificate: {ex.Message}");
+        }
+        finally
+        {
+            IsSaving = false;
+        }
+    }
+
+    private async Task HandleGenerateCertificate()
+    {
+        if (string.IsNullOrWhiteSpace(Model.Name))
+        {
+            await OnError.InvokeAsync("Name is required to generate a certificate.");
+            return;
+        }
+
+        try
+        {
+            IsSaving = true;
+            await Manager.GenerateCertificateAsync(Model.Name);
+            Model = new CertificateInput();
+            await RefreshCertificates();
+            await OnCertificateAdded.InvokeAsync("Self-signed certificate generated.");
+        }
+        catch (Exception ex)
+        {
+            await OnError.InvokeAsync($"Failed to generate certificate: {ex.Message}");
         }
         finally
         {

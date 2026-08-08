@@ -1,19 +1,20 @@
 {
-  "profiles": {
-    "MqttRouting.AppHost": {
-      "commandName": "Project",
-      "dotnetRunMessages": true,
-      "launchBrowser": false,
-      "applicationUrl": "https://localhost:17192;http://localhost:15192",
-      "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development",
-        "BaseDomain": "example.com",
-        "HTTP_PROXY": "",
-        "HTTPS_PROXY": "",
-        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:18889",
-        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "http://localhost:18890",
-        "ASPIRE_DASHBOARD_GRPC_ENDPOINT_URL": "http://localhost:18889"
-      }
-    }
-  }
+	"profiles": {
+		"MqttRouting.AppHost": {
+			"commandName": "Project",
+			"dotnetRunMessages": true,
+			"launchBrowser": false,
+			"applicationUrl": "https://localhost:17192;http://localhost:15192",
+			"environmentVariables": {
+				"ASPNETCORE_ENVIRONMENT": "Development",
+				"BaseDomain": "example.com",
+				"HTTP_PROXY": "",
+				"HTTPS_PROXY": "",
+				"ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:18889",
+				"ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "http://localhost:18890",
+				"ASPIRE_DASHBOARD_GRPC_ENDPOINT_URL": "http://localhost:18889",
+				"ASPIRE_ALLOW_UNSECURED_TRANSPORT": "true"
+			}
+		}
+	}
 }

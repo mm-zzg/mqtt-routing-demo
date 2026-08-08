@@ -158,7 +158,8 @@ sealed class MqttTcpGatewayService : IHostedService
 
         // Export and re-import as PFX so it's usable as a server cert with private key
         var pfxBytes = cert.Export(X509ContentType.Pfx);
-        return X509CertificateLoader.LoadCertificate(pfxBytes);
+        return X509CertificateLoader.LoadPkcs12(pfxBytes, password: null,
+            keyStorageFlags: X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
     }
 
     // ── Accept loops ───────────────────────────────────────────────────

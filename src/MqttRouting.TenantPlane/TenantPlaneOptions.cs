@@ -15,9 +15,9 @@ internal sealed record TenantPlaneOptions
 
     /// <summary>
     /// External TCP ports that accept MQTT connections and forward them
-    /// to the internal broker. Defaults to [1883, 1884].
+    /// to the internal broker. Must be configured explicitly — no default.
     /// </summary>
-    public List<int> TcpListenerPorts { get; set; } = [1883, 1884];
+    public List<int> TcpListenerPorts { get; set; } = [];
 
     /// <summary>
     /// File-system path for a Unix domain socket / named pipe IPC endpoint.

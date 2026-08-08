@@ -15,10 +15,9 @@ builder.Services.AddOptions<TenantPlaneOptions>()
             .Where(p => p > 0 && p != options.InternalBrokerPort)
             .Distinct()
             .ToList();
-        if (options.TcpListenerPorts.Count == 0)
-        {
-            options.TcpListenerPorts = [1883, 1884];
-        }
+        // No default TCP listener ports — must be configured explicitly.
+        // This avoids port conflicts with MqttGateway (1883) and other services
+        // in local debug mode.
     });
 builder.Services.AddSingleton<TenantMessageStore>();
 builder.Services.AddSingleton<MqttBrokerService>();

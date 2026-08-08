@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.EntityFrameworkCore;
 using MQTTnet;
@@ -42,6 +43,40 @@ public sealed class ClientSimulatorManager
             Name = input.Name.Trim(),
             PfxBase64 = input.PfxBase64.Trim(),
             Password = input.Password
+        };
+        db.Certificates.Add(entity);
+        await db.SaveChangesAsync();
+
+        return entity.Id;
+    }
+
+    public async Task<string> GenerateCertificateAsync(string name)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest(
+            $"CN=MQTT Simulator Client - {name.Trim()}, O=Dev, OU=MQTT",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+
+        req.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        req.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+
+        var cert = req.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1),
+            DateTimeOffset.UtcNow.AddYears(1));
+
+        var password = Guid.NewGuid().ToString("N")[..16];
+        var pfxBytes = cert.Export(X509ContentType.Pfx, password);
+
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var entity = new CertificateEntity
+        {
+            Name = name.Trim(),
+            PfxBase64 = Convert.ToBase64String(pfxBytes),
+            Password = password
         };
         db.Certificates.Add(entity);
         await db.SaveChangesAsync();
