@@ -25,15 +25,12 @@ builder.AddProject("tenantB", @"..\MqttRouting.TenantPlane\MqttRouting.TenantPla
     .WithEnvironment("TenantPlane__InternalBrokerPort", "11884")
     .WithEnvironment("TenantPlane__TcpListenerPorts__0", "1887");
 
-// MqttGateway: publicly exposed. Accepts MQTT-over-TCP from devices,
-// parses CONNECT, extracts tenant from client ID, bridges TCP → TenantPlane.
-// Supports optional Proxy Protocol v2 from upstream L4 load balancers.
+// MqttGateway: MQTT-over-TLS only. Parses CONNECT, extracts tenant from
+// client ID, bridges TLS → TenantPlane with PPv2 client cert forwarding.
 builder.AddProject("mqtt-gateway", @"..\MqttRouting.MqttGateway\MqttRouting.MqttGateway.csproj")
     .WithHttpEndpoint(targetPort: 18200)
-    .WithEndpoint(targetPort: 1883, scheme: "tcp", name: "mqtt-tcp")
     .WithEndpoint(targetPort: 8883, scheme: "tcp", name: "mqtt-tls")
     .WithEnvironment("MqttGateway__BaseDomain", baseDomain)
-    .WithEnvironment("MqttGateway__MqttTcpListenPort", "1883")
     .WithEnvironment("MqttGateway__MqttTlsListenPort", "8883")
     .WithEnvironment("MqttGateway__RouteTable__0__Tenant", "tenantA")
     .WithEnvironment("MqttGateway__RouteTable__0__Host", "localhost")
@@ -55,10 +52,10 @@ builder.AddProject("ingress", @"..\MqttRouting.Ingress\MqttRouting.Ingress.cspro
     .WithEnvironment("Ingress__RouteTable__1__BackendHost", "localhost")
     .WithEnvironment("Ingress__RouteTable__1__BackendPort", "18081");
 
-// ClientSimulator: connects directly to MqttGateway via MQTT-over-TCP
+// ClientSimulator: connects to MqttGateway via MQTT-over-TLS
 builder.AddProject("client-simulator", @"..\MqttRouting.ClientSimulator\MqttRouting.ClientSimulator.csproj")
     .WithHttpEndpoint(targetPort: 18110)
     .WithEnvironment("ClientSimulator__BrokerHost", "localhost")
-    .WithEnvironment("ClientSimulator__BrokerPort", "1883");
+    .WithEnvironment("ClientSimulator__BrokerPort", "8883");
 
 builder.Build().Run();

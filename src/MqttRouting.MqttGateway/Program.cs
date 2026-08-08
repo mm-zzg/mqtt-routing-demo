@@ -15,12 +15,11 @@ builder.Services.AddOptions<MqttGatewayOptions>()
     .PostConfigure(options =>
     {
         options.BaseDomain = string.IsNullOrWhiteSpace(options.BaseDomain) ? "example.com" : options.BaseDomain;
-        options.MqttTcpListenPort = options.MqttTcpListenPort <= 0 ? 1883 : options.MqttTcpListenPort;
         options.MqttTlsListenPort = options.MqttTlsListenPort <= 0 ? 8883 : options.MqttTlsListenPort;
     });
 
-// TCP listeners: plain TCP (optional PPv2 for L4 LB) + TLS (with client cert forwarding)
-builder.Services.AddHostedService<MqttTcpGatewayService>();
+// TLS-only listener (with client cert forwarding)
+builder.Services.AddHostedService<MqttTlsGatewayService>();
 
 var app = builder.Build();
 app.MapDefaultEndpoints();
@@ -28,7 +27,6 @@ app.MapGet("/", (IOptions<MqttGatewayOptions> options) =>
     Results.Ok(new
     {
         baseDomain = options.Value.BaseDomain,
-        mqttTcpListenPort = options.Value.MqttTcpListenPort,
         mqttTlsListenPort = options.Value.MqttTlsListenPort,
         useTls = options.Value.HasTlsCert(),
         routeTable = options.Value.RouteTable.Select(r => new { r.Tenant, r.Host, r.Port })
@@ -37,19 +35,18 @@ app.MapGet("/", (IOptions<MqttGatewayOptions> options) =>
 await app.RunAsync();
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MQTT TCP/TLS Gateway Service
+// MQTT TLS Gateway Service (TLS-only, no plain TCP)
 // ═══════════════════════════════════════════════════════════════════════════
 
-sealed class MqttTcpGatewayService : IHostedService
+sealed class MqttTlsGatewayService : IHostedService
 {
     private readonly MqttGatewayOptions _options;
-    private readonly ILogger<MqttTcpGatewayService> _logger;
-    private TcpListener? _plainListener;
+    private readonly ILogger<MqttTlsGatewayService> _logger;
     private TcpListener? _tlsListener;
     private X509Certificate2? _serverCert;
     private CancellationTokenSource? _cts;
 
-    public MqttTcpGatewayService(IOptions<MqttGatewayOptions> options, ILogger<MqttTcpGatewayService> logger)
+    public MqttTlsGatewayService(IOptions<MqttGatewayOptions> options, ILogger<MqttTlsGatewayService> logger)
     {
         _options = options.Value;
         _logger = logger;
@@ -61,26 +58,18 @@ sealed class MqttTcpGatewayService : IHostedService
 
         _serverCert = LoadCertificate();
 
-        // Plain TCP listener (port 1883 by default)
-        _plainListener = new TcpListener(IPAddress.Any, _options.MqttTcpListenPort);
-        _plainListener.Start();
-        _logger.LogInformation("MQTT plain TCP listener on :{Port}", _options.MqttTcpListenPort);
-
-        // TLS listener (port 8883 by default)
         _tlsListener = new TcpListener(IPAddress.Any, _options.MqttTlsListenPort);
         _tlsListener.Start();
         _logger.LogInformation("MQTT TLS listener on :{Port} (cert subject: {Subject})",
             _options.MqttTlsListenPort, _serverCert?.Subject ?? "(self-signed)");
 
-        _ = AcceptLoopAsync(_plainListener, useTls: false, _cts.Token);
-        _ = AcceptLoopAsync(_tlsListener, useTls: true, _cts.Token);
+        _ = AcceptLoopAsync(_tlsListener, _cts.Token);
         return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
         _cts?.Cancel();
-        _plainListener?.Stop();
         _tlsListener?.Stop();
         _serverCert?.Dispose();
         return Task.CompletedTask;
@@ -162,16 +151,16 @@ sealed class MqttTcpGatewayService : IHostedService
             keyStorageFlags: X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
     }
 
-    // ── Accept loops ───────────────────────────────────────────────────
+    // ── Accept loop ────────────────────────────────────────────────────
 
-    private async Task AcceptLoopAsync(TcpListener listener, bool useTls, CancellationToken ct)
+    private async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
     {
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 var client = await listener.AcceptTcpClientAsync(ct);
-                _ = HandleClientAsync(client, useTls, ct);
+                _ = HandleClientAsync(client, ct);
             }
         }
         catch (OperationCanceledException) { }
@@ -179,60 +168,42 @@ sealed class MqttTcpGatewayService : IHostedService
         catch (SocketException) { }
     }
 
-    // ── Per-connection handler ─────────────────────────────────────────
+    // ── Per-connection handler (TLS only) ──────────────────────────────
 
-    private async Task HandleClientAsync(TcpClient client, bool useTls, CancellationToken ct)
+    private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
     {
         using var __ = client;
         var rawStream = client.GetStream();
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "?";
         X509Certificate2? clientCert = null;
-        IPEndPoint? originalSource = null;
         Stream stream = rawStream;
 
         try
         {
-            // ── TLS handshake (TLS port only) ──
-            if (useTls && _serverCert is not null)
+            // ── TLS handshake ─────────────────────────────────────
+            var sslStream = new SslStream(rawStream, false,
+                (sender, certificate, chain, errors) => true, // accept any client cert
+                null);
+            stream = sslStream;
+
+            await sslStream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
             {
-                var sslStream = new SslStream(rawStream, false,
-                    (sender, certificate, chain, errors) => true, // accept any client cert
-                    null);
-                stream = sslStream;
+                ServerCertificate = _serverCert!,
+                ClientCertificateRequired = false,
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+            }, ct);
 
-                await sslStream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
-                {
-                    ServerCertificate = _serverCert,
-                    ClientCertificateRequired = false,
-                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck
-                }, ct);
-
-                if (sslStream.RemoteCertificate is X509Certificate2 remoteCert)
-                {
-                    clientCert = remoteCert;
-                    _logger.LogInformation("MQTT TLS gateway: client {Remote} presented cert {Subject} ({Thumbprint})",
-                        remote, clientCert.Subject,
-                        Convert.ToHexString(clientCert.GetCertHash(HashAlgorithmName.SHA256)));
-                }
-                else
-                {
-                    _logger.LogInformation("MQTT TLS gateway: client {Remote} connected (no client cert)", remote);
-                }
-
-                // Use the SSL-decrypted stream for subsequent reads
+            if (sslStream.RemoteCertificate is X509Certificate2 remoteCert)
+            {
+                clientCert = remoteCert;
+                _logger.LogInformation("MQTT TLS gateway: client {Remote} presented cert {Subject} ({Thumbprint})",
+                    remote, clientCert.Subject,
+                    Convert.ToHexString(clientCert.GetCertHash(HashAlgorithmName.SHA256)));
             }
             else
             {
-                // ── Parse optional Proxy Protocol v2 header (from upstream L4 LB on plain TCP) ──
-                try
-                {
-                    (originalSource, _) = await ProxyProtocol.ReadV2HeaderAsync(rawStream, ct);
-                }
-                catch
-                {
-                    // If PPv2 parsing fails, proceed without it
-                }
+                _logger.LogInformation("MQTT TLS gateway: client {Remote} connected (no client cert)", remote);
             }
         }
         catch (AuthenticationException ex)
@@ -253,9 +224,8 @@ sealed class MqttTcpGatewayService : IHostedService
 
         try
         {
-            var displayRemote = originalSource?.ToString() ?? remote;
-            _logger.LogInformation("MQTT gateway: accepted {Remote} (useTLS={UseTls}, clientCert={HasCert})",
-                displayRemote, useTls, clientCert is not null);
+            _logger.LogInformation("MQTT gateway: accepted {Remote} (clientCert={HasCert})",
+                remote, clientCert is not null);
 
             // ── Read & parse MQTT CONNECT from stream ──
             byte[] connectBuffer = new byte[4096];
@@ -348,7 +318,7 @@ sealed class MqttTcpGatewayService : IHostedService
 
             if (tenant is null)
             {
-                _logger.LogWarning("Rejecting {Endpoint}: no tenant prefix in clientId '{ClientId}'", displayRemote, clientId);
+                _logger.LogWarning("Rejecting {Endpoint}: no tenant prefix in clientId '{ClientId}'", remote, clientId);
                 byte[] reject = protocolLevel == 5
                     ? new byte[] { 0x20, 0x03, 0x00, 0x02, 0x00 }
                     : new byte[] { 0x20, 0x02, 0x00, 0x02 };
@@ -390,8 +360,7 @@ sealed class MqttTcpGatewayService : IHostedService
             // ── Send Proxy Protocol v2 header (with client cert TLV if present) ──
             await using var downstreamStream = downstream.GetStream();
             var tenantLocalEp = downstream.Client.LocalEndPoint ?? new IPEndPoint(IPAddress.None, 0);
-            var srcEp = originalSource
-                ?? (client.Client.RemoteEndPoint as IPEndPoint)
+            var srcEp = (client.Client.RemoteEndPoint as IPEndPoint)
                 ?? new IPEndPoint(IPAddress.None, 0);
             var proxyHeader = ProxyProtocol.BuildV2Header(srcEp, tenantLocalEp, clientCert);
             await downstreamStream.WriteAsync(proxyHeader, ct);
@@ -459,7 +428,6 @@ sealed class MqttTcpGatewayService : IHostedService
 sealed record MqttGatewayOptions
 {
     public string BaseDomain { get; set; } = "example.com";
-    public int MqttTcpListenPort { get; set; } = 1883;
     public int MqttTlsListenPort { get; set; } = 8883;
 
     // TLS certificate
